@@ -44,7 +44,7 @@ executable that compiles and runs `.mojo` files on the machine you are sitting a
 | **Upstream** | `modular/modular` @ `f66d4d5` |
 | **Language version** | Mojo 1.1.0 — **frozen, see below** |
 | **Target** | `aarch64-pc-windows-msvc`, Windows 11, Snapdragon X |
-| **Scope** | Mojo compiler (KGEN), C++ substrate, stdlib, CPU codegen — plus, via **DragonMax** (`dragon/`), GPU offload: a SPIR-V backend and `dragonrt`, a from-scratch implementation of the MAX device ABI, driving the Adreno |
+| **Scope** | Mojo compiler (KGEN), C++ substrate, stdlib, CPU codegen — plus, via **DragonMax** (`dragon/`), GPU offload: a SPIR-V backend and `dragonrt`, **our own interface to the Adreno** behind Mojo's standard device API |
 | **Out of scope** | MAX's graph engine and serving (unpublished upstream — nothing to port), Modular's binary distributions (never used, deliberately) |
 | **Licence** | Apache 2.0 with LLVM exceptions (compiler & stdlib) |
 
@@ -561,13 +561,17 @@ The Mojo compiler (`KGEN/`), the substrate, and the standard library are Apache
 with a patent grant, and binary attribution waived. That is precisely why the
 scope line is drawn where it is.
 
-The `max/` tree is used **only through its per-file Apache 2.0 headers** —
-4,585 files carry them, and the Community License itself concedes Apache
-"controls" for those components (the full reading is in the licence-traps
-section below). What DragonMax built from them — `dragonrt`, the SPIR-V
-backend — is as open as the sources it read. Modular's *binary* MAX
-distributions, which the Community License actually governs, have never
-entered this tree, deliberately.
+The position on `max/` is simple and worth stating as a sentence: **we use MAX
+for nothing except its intended purpose — running Mojo — and we roll our own
+interface to the Adreno.** What a Mojo program touches of `max/` is its
+device API (`DeviceContext`, `enqueue_function`): the standard way Mojo talks
+to an accelerator, used here exactly as designed. Everything underneath that
+API on this machine is ours — `dragonrt` implements the device ABI from the
+published, per-file Apache 2.0 declarations (4,585 files under `max/` carry
+those headers, and the Community License itself concedes Apache "controls"
+for them; the full reading is in the licence-traps section below). No
+Modular engine, no repurposing, and no Modular binary has ever entered this
+tree — deliberately. Interoperation, not appropriation.
 
 Upstream is [modular/modular](https://github.com/modular/modular). All original
 design credit belongs to Modular; the errors in this port are mine.
