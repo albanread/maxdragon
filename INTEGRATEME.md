@@ -1,5 +1,9 @@
 # INTEGRATE ME — Adreno GPU support for your Mojo port
 
+> **STATUS 2026-08-20: INTEGRATED. SG4 GREEN.** The acceptance test passes on
+> hardware with one command and no env vars. This document is preserved as the
+> runbook it was; the checklist at the bottom is fully ticked in reality.
+
 You are the WINMOJO compiler team. This file is the entire integration, in
 order, with copy-paste commands and a checklist at the end. It is shorter than
 your last bazel log. Read all of it once; after that you never need the

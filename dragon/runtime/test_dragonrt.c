@@ -38,6 +38,58 @@ static int64_t (*DB_bytesize)(const void *);
 static void (*DB_release)(const void *);
 static void (*DF_release)(const void *);
 
+#ifdef DRAGONRT_STATIC
+/* Bazel builds dragonrt as a static library, so there is no dragonrt.dll to
+ * LoadLibrary. Bind the same symbols by direct linkage instead; the ABI under
+ * test is identical, only the export-table hop is skipped. */
+extern const char *AsyncRT_DeviceContext_create(const void **, const char *, int);
+extern void AsyncRT_DeviceContext_release(const void *);
+extern int64_t AsyncRT_DeviceContext_id(const void *);
+extern const char *AsyncRT_DeviceContext_deviceName(const void *);
+extern void AsyncRT_DeviceContext_deviceApi(StringRefABI *, const void *);
+extern const char *AsyncRT_DeviceContext_getApiVersion(int *, const void *);
+extern const char *AsyncRT_DeviceContext_synchronize(const void *);
+extern void AsyncRT_DeviceContext_strfree(const char *);
+extern const char *AsyncRT_DeviceContext_getMemoryInfo(const void *, size_t *, size_t *);
+extern const char *AsyncRT_DeviceContext_maxSingleAllocationSize(size_t *, const void *);
+extern const char *AsyncRT_DeviceContext_createBuffer_async(const void **, void **,
+                                                            const void *, size_t, size_t);
+extern const char *AsyncRT_DeviceContext_HtoD_async(const void *, const void *,
+                                                    const void *);
+extern const char *AsyncRT_DeviceContext_DtoH_async(const void *, void *, const void *);
+extern const char *AsyncRT_DeviceContext_loadFunction(const void **, const void *,
+                                                      const char *, const char *,
+                                                      const char *, size_t, int32_t,
+                                                      const char *, int32_t);
+extern const char *AsyncRT_DeviceContext_enqueueFunctionDirect(
+    const void *, const void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, void *, uint32_t, void **, uint32_t, uint64_t *);
+extern int64_t AsyncRT_DeviceBuffer_bytesize(const void *);
+extern void AsyncRT_DeviceBuffer_release(const void *);
+extern void AsyncRT_DeviceFunction_release(const void *);
+
+static void bind_static(void) {
+    DC_create = AsyncRT_DeviceContext_create;
+    DC_release = AsyncRT_DeviceContext_release;
+    DC_id = AsyncRT_DeviceContext_id;
+    DC_deviceName = AsyncRT_DeviceContext_deviceName;
+    DC_deviceApi = AsyncRT_DeviceContext_deviceApi;
+    DC_getApiVersion = AsyncRT_DeviceContext_getApiVersion;
+    DC_synchronize = AsyncRT_DeviceContext_synchronize;
+    DC_strfree = AsyncRT_DeviceContext_strfree;
+    DC_getMemoryInfo = AsyncRT_DeviceContext_getMemoryInfo;
+    DC_maxAlloc = AsyncRT_DeviceContext_maxSingleAllocationSize;
+    DC_createBuffer = AsyncRT_DeviceContext_createBuffer_async;
+    DC_HtoD = AsyncRT_DeviceContext_HtoD_async;
+    DC_DtoH = AsyncRT_DeviceContext_DtoH_async;
+    DC_loadFunction = AsyncRT_DeviceContext_loadFunction;
+    DC_launch = AsyncRT_DeviceContext_enqueueFunctionDirect;
+    DB_bytesize = AsyncRT_DeviceBuffer_bytesize;
+    DB_release = AsyncRT_DeviceBuffer_release;
+    DF_release = AsyncRT_DeviceFunction_release;
+}
+#endif
+
 static int fails = 0;
 
 static void check(const char *what, const char *err) {
@@ -59,6 +111,10 @@ static const char *KSRC =
 #define N 4096
 
 int main(int argc, char **argv) {
+#ifdef DRAGONRT_STATIC
+    bind_static();
+    printf("bound statically (bazel mode)\n");
+#else
     HMODULE h = LoadLibraryA("dragonrt.dll");
     if (!h) { printf("cannot load dragonrt.dll (%lu)\n", GetLastError()); return 1; }
 
@@ -85,7 +141,9 @@ int main(int argc, char **argv) {
     BIND(DB_release, "AsyncRT_DeviceBuffer_release")
     BIND(DF_release, "AsyncRT_DeviceFunction_release")
 #undef BIND
-    printf("all bring-up exports resolved\n\n");
+    printf("all bring-up exports resolved\n");
+#endif
+    printf("\n");
 
     const void *ctx = NULL;
     check("DeviceContext_create(\"adreno\", 0)", DC_create(&ctx, "adreno", 0));

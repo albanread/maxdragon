@@ -29,7 +29,14 @@ not a judgement call.
 | LLVM SPIRV backend enabled | `bazel/public-patches/llvm_project.bzl` | `"SPIRV"` confirmed in the overlay's target list |
 | Offload flow traced, no gaps | `dragon/design/OFFLOAD-FLOW.md` | file:line chain from `enqueue_function` to `clEnqueueNDRangeKernel` |
 
-## The finish line (decided)
+## The finish line (decided) — **CROSSED 2026-08-20**
+
+> `adreno_saxpy` builds with one command and **PASSES on the Adreno X1-45**.
+> SG4 green; the compiler-side address-space fix landed as
+> `SpirvKernelArgAddressSpace` (hosted by `SpirvLowering` via
+> `addPostLowerToLLVMPasses`); the runtime bridge deleted itself per its own
+> comment. This section is preserved as written, as the definition the
+> crossing was measured against.
 
 > **The GPU line is FINISHED when `dragon/mojo-tests/adreno_saxpy.mojo`
 > compiles with WINMOJO's `mojo build --target-accelerator adreno-x1` and

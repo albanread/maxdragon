@@ -1408,3 +1408,70 @@ correctness. When overlap matters, the right fix is events, not CL_FALSE.
   under Bazel.
 - Two trace switches stay: `DRAGONRT_TRACE_ARGS`, `DRAGONRT_TRACE_COPY`.
   Both are one `getenv` on a cold path.
+
+---
+
+## 2026-08-20 — SG4 GREEN: the acceptance test passes. The GPU line is finished.
+
+Their landing (`4bb7a99c85`, merged here): the **unmodified**
+`adreno_saxpy.mojo`, one command, no env vars, bridge deleted — **PASS on the
+Adreno X1-45**. That is the finish line exactly as `HANDOFF.md` defined it on
+day one: an executable test, not a judgement call. Crossed.
+
+The root cause held precisely, and the fix landed where the trio design said
+it should: `SpirvKernelArgAddressSpace`, a late pass **contributed by our
+`SpirvLowering` via `addPostLowerToLLVMPasses`** (not `markExportedKernel`,
+which fires before a body exists to rewrite) — promotes SPIR_KERNEL
+addrspace(0) pointer params to addrspace(1), propagates through the
+GEP/bitcast closure, and refuses with a diagnostic rather than half-retyping.
+Verified with our own `spv_tool.py` on a fresh dump: CrossWorkgroup params.
+The extension hooks we chose in W3 turned out to be exactly the right sockets.
+
+Behind the address-space fix, three more bugs surfaced in strict sequence,
+each unobservable until the one above died:
+
+1. **`clSetKernelArg(3) = -51`** — argSizes arriving NULL from two separate
+   Mojo launch paths (`Optional[Pointer]` lowering as an indirect aggregate;
+   `_call_with_pack_checked` never building a sizes array at all).
+2. **4071/4096 wrong** — and their instinct to keep the index probes paid
+   off: indices verified perfect (re-confirming v3i32 builtins harmless), a
+   passthrough kernel failed identically, and a kernel-free H2D→D2H echo
+   pinned it: **OpenCLOn12 does not honour in-order visibility for CL_FALSE
+   host transfers and corrupts the first 16 bytes even after `clFinish`.**
+   All host-touching transfers in dragonrt are now blocking; the `_async` ABI
+   contract survives because callers synchronize anyway. Trap #12.
+3. Their symmetry note, worth engraving: **nobody had ever exercised
+   host-write-then-kernel-read through the full stack before** — the C test
+   had a program build between copy and launch, and the index probe's kernel
+   overwrote every slot before readback. The whole defect class was
+   unobservable until everything above it worked. Layered bring-up does not
+   find bugs early; it finds them *in order*.
+
+### Merge-side work (this session)
+
+- **Their landing carried one broken byte**: a `'\0'` literal collapsed into
+  an actual NUL during their push (their escapes-in-transit gremlin again),
+  making `dragonrt.cpp` "binary" to grep and `C2137` to MSVC. Fixing it became
+  its own comedy: three successive shell-quoted repairs each reported success
+  while writing nothing — three quoting layers deep, the splice was a no-op
+  every time. The fix that worked was a script written by the file-writing
+  tool and run unquoted. Lesson for the ledger: **byte surgery never goes
+  through a shell.**
+- **Their bounced item closed**: `test_dragonrt.c` now has a
+  `DRAGONRT_STATIC` mode — direct symbol binding for Bazel's static-lib
+  target, LoadLibrary mode preserved as default. Both modes built and ran
+  here: **ALL PASS**, including the AS1 module through the merged runtime
+  (exercising their new blocking-transfer path).
+- README, HANDOFF, ladder, INTEGRATEME all updated from "waiting" to
+  "finished". The sad README gets its one sentence of triumph and keeps its
+  voice.
+
+### Where this leaves the objective
+
+"Allow our Mojo for Windows port to use our accelerated Snapdragon features,
+the standard Mojo way" — **done for the GPU**, by construction and now by
+measurement. Remaining, none of it blocking: the D3D12 tax measurement
+(`DRAGONRT_PREFER` switch is ready), Route 3/native ingest as a
+when-it-matters upgrade, W5 kernel-library curation, and the NPU line's int8
+and ceiling work, which never needed any of this and has been quietly ahead
+the whole time.

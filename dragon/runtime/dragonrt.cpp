@@ -733,7 +733,7 @@ __declspec(dllexport) const char *AsyncRT_DeviceContext_loadFunction(
         size_t n = 0;
         if (clGetProgramInfo(prog, 0x1166 /* CL_PROGRAM_KERNEL_NAMES */, 0,
                              nullptr, &n) == CL_SUCCESS && n) {
-            names.assign(n, ' ');
+            names.assign(n, '\0');
             clGetProgramInfo(prog, 0x1166, n, &names[0], nullptr);
         }
         cl_uint count = 0;
