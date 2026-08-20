@@ -24,6 +24,13 @@
 #include <set>
 
 #if defined(_WIN32)
+// winsock2.h must precede windows.h, which otherwise pulls in the original
+// winsock.h and the two conflict. It is required explicitly in any case: the
+// toolchain defines WIN32_LEAN_AND_MEAN globally, and that suppresses the
+// sockets header windows.h would have included.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include <io.h>
 #include <windows.h>
 typedef int socklen_t;
@@ -278,7 +285,7 @@ static ErrorOrSuccess invokeRPC(bool dryRun, ArrayRef<int> ports,
                                       /*shouldClose=*/true,
                                       /*unbuffered=*/true);
   llvm::errs() << "[INFO] Additional logs can be found in "
-               << logFileOrErr->getPath()
+               << logFileOrErr->getPath().string()
                << ". Please include them when reporting bugs.\n\n";
   extraLogStream << "Server-side logs can be found in the `Mojo` section of "
                     "the `Output` tab of each VSCode Window.\n\n";

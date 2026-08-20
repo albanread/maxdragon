@@ -214,15 +214,15 @@ static ErrorOr<bool> isExistingDirectory(const std::filesystem::path &path) {
   if (ec)
     return Error(
         llvm::formatv("could not determine if output path '{0}' exists: {1}",
-                      path, ec.message()));
+                      path.string(), ec.message()));
   if (!exists)
     return false;
 
   bool isDirectory = std::filesystem::is_directory(path, ec);
   if (ec)
     return Error(llvm::formatv(
-        "could not determine if output path '{0}' is a directory: {1}", path,
-        ec.message()));
+        "could not determine if output path '{0}' is a directory: {1}",
+        path.string(), ec.message()));
   return isDirectory;
 }
 
@@ -272,7 +272,7 @@ static ErrorOrSuccess parsePrecompileArgs(const State &state,
         return isDirectoryOr.takeError();
       if (*isDirectoryOr) {
         outputPath = outputPath / (inputDirName + extension);
-        pkgArgs.outputPath = outputPath;
+        pkgArgs.outputPath = outputPath.string();
       }
 
       if (outputPath.extension() != ".mojoc")

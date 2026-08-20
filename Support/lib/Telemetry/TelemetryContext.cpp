@@ -45,6 +45,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -156,7 +157,7 @@ const M::Telemetry::LocalIDs &M::Telemetry::createLocalIDs() {
 
     auto hash = hashState.result();
     std::string machineID =
-        encodeURLSafeBase64(StringRef((char *)hash.begin(), hash.size()));
+        encodeURLSafeBase64(StringRef(reinterpret_cast<const char *>(hash.data()), hash.size()));
 
     // Mix in some random bytes in order to construct a local session
     // identifier. This may suffer from a cardinality explosion (and we may
@@ -169,7 +170,7 @@ const M::Telemetry::LocalIDs &M::Telemetry::createLocalIDs() {
     hashState.update(scratchBuf);
     hash = hashState.result();
     std::string sessionID =
-        encodeURLSafeBase64(StringRef((char *)hash.begin(), hash.size()));
+        encodeURLSafeBase64(StringRef(reinterpret_cast<const char *>(hash.data()), hash.size()));
 
     return LocalIDs{machineID, sessionID};
   }();

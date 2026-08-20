@@ -691,12 +691,15 @@ static int linkOutput(OutputType outputType, const State &state,
     }
   }();
   // Validate this is a valid filename using the `path` ctor.
-  defaultOutputName = std::filesystem::path(defaultOutputName).filename();
+  // .string(): filename() yields a path, which converts implicitly to
+  // std::string only where path::value_type is char.
+  defaultOutputName =
+      std::filesystem::path(defaultOutputName).filename().string();
 
   std::error_code ec;
   std::filesystem::path cwd = std::filesystem::current_path(ec);
   if (!ec)
-    defaultOutputName = cwd.append(defaultOutputName);
+    defaultOutputName = cwd.append(defaultOutputName).string();
 
   // Invoke the system linker to link the archive into an executable or produce
   // a dynamic library using the provided output filename argument. The
@@ -756,7 +759,22 @@ static int linkOutput(OutputType outputType, const State &state,
   if (!std::filesystem::exists(compilerRTPath.str(), ec) || ec)
     return state.reportError("unable to locate Mojo CompilerRT library");
 
-  // Invoke the linker command.
+#if defined(_WIN32)
+  // The configuration names the .dll because the JIT path loads that file
+  // directly, but a PE link consumes the import library sitting beside it.
+  // One config key, two consumers; the translation belongs at the link line.
+  std::string compilerRTImportLib;
+  if (compilerRTPath.ends_with_insensitive(".dll")) {
+    compilerRTImportLib = (compilerRTPath.drop_back(4) + ".lib").str();
+    if (std::filesystem::exists(compilerRTImportLib, ec) && !ec)
+      compilerRTPath = compilerRTImportLib;
+  }
+#endif
+
+  // Invoke the linker command. wholeArchiveArg lives at function scope
+  // because the linker argument vector holds StringRefs into it until the
+  // command runs.
+  std::string wholeArchiveArg;
   SmallVector<StringRef> linkerArgs = [&] {
     if (outputType == OutputType::executable)
       return SmallVector<StringRef>{*linker, archivePath, compilerRTPath};
@@ -771,6 +789,11 @@ static int linkOutput(OutputType outputType, const State &state,
 #if defined(__APPLE__)
     linkerInvocation.push_back("-Wl,-force_load");
     linkerInvocation.push_back(archivePath);
+#elif defined(_WIN32)
+    // lld-link ignores the GNU spelling with a warning, which silently drops
+    // the force-load and strips every "unused" export from the library.
+    wholeArchiveArg = "-Wl,/WHOLEARCHIVE:" + archivePath;
+    linkerInvocation.push_back(wholeArchiveArg);
 #else
     linkerInvocation.push_back("-Wl,--whole-archive");
     linkerInvocation.push_back(archivePath);
@@ -802,8 +825,26 @@ static int linkOutput(OutputType outputType, const State &state,
   linkerArgs.emplace_back("msvcrt.lib");
 #endif
 
-  // Mojo only supports X86_64 COFF right now.
-  linkerArgs.emplace_back("/machine:X64");
+  // The standard library's FFI layer calls POSIX names -- write, dup and
+  // friends -- which the MSVC CRT exports with a leading underscore.
+  // oldnames.lib supplies the un-prefixed aliases. cl.exe requests it through
+  // a /DEFAULTLIB directive in its objects, but Mojo emits its own objects and
+  // invokes the linker directly, so nothing asks for it unless we do.
+  linkerArgs.emplace_back("oldnames.lib");
+
+  // Match the COFF machine type to the target architecture. This was
+  // hardcoded to X64 with the note "Mojo only supports X86_64 COFF right now",
+  // which makes every AOT link on Windows ARM64 fail in the linker rather than
+  // in the compiler. The target triple is already parsed a few lines below for
+  // the libm decision, so the arch is available here.
+  if (llvm::Triple triple(options.targetTriple); triple.isAArch64()) {
+    linkerArgs.emplace_back("/machine:ARM64");
+  } else if (triple.getArch() == llvm::Triple::x86_64) {
+    linkerArgs.emplace_back("/machine:X64");
+  } else {
+    return state.reportError(llvm::formatv(
+        "unsupported COFF target architecture '{0}'", triple.getArchName()));
+  }
 #else
   linkerArgs.emplace_back("-o");
   linkerArgs.emplace_back(outputName);

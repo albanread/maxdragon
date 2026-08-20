@@ -81,6 +81,7 @@ CLFN(cl_program, clCreateProgramWithSource, cl_context, cl_uint, const char **,
 CLFN(cl_program, clCreateProgramWithIL, cl_context, const void *, size_t, cl_int *)
 CLFN(cl_int, clBuildProgram, cl_program, cl_uint, const cl_device_id *, const char *,
      void *, void *)
+CLFN(cl_int, clGetProgramInfo, cl_program, cl_uint, size_t, void *, size_t *)
 CLFN(cl_int, clGetProgramBuildInfo, cl_program, cl_device_id, cl_uint, size_t, void *,
      size_t *)
 CLFN(cl_int, clReleaseProgram, cl_program)
@@ -115,6 +116,7 @@ static bool loadCL() {
     GET(clCreateCommandQueue) GET(clReleaseCommandQueue) GET(clCreateBuffer)
     GET(clReleaseMemObject) GET(clCreateProgramWithSource)
     GET(clCreateProgramWithIL) GET(clBuildProgram) GET(clGetProgramBuildInfo)
+    GET(clGetProgramInfo)
     GET(clReleaseProgram) GET(clCreateKernel) GET(clReleaseKernel)
     GET(clSetKernelArg) GET(clEnqueueWriteBuffer) GET(clEnqueueReadBuffer)
     GET(clEnqueueCopyBuffer) GET(clEnqueueFillBuffer)
@@ -506,6 +508,12 @@ __declspec(dllexport) void AsyncRT_DeviceBuffer_retain(const DragonBuffer *b) {
     if (b) const_cast<DragonBuffer *>(b)->rc.fetch_add(1);
 }
 
+/* The stdlib grew this accessor after the ABI spec was generated: copies
+ * route through the buffer's owning context. A borrow, not a retain. */
+__declspec(dllexport) DragonContext *AsyncRT_DeviceBuffer_context(const DragonBuffer *b) {
+    return b ? b->ctx : nullptr;
+}
+
 __declspec(dllexport) void AsyncRT_DeviceBuffer_release(const DragonBuffer *b) {
     if (!b) return;
     auto *x = const_cast<DragonBuffer *>(b);
@@ -520,7 +528,10 @@ __declspec(dllexport) void AsyncRT_DeviceBuffer_release(const DragonBuffer *b) {
 __declspec(dllexport) const char *AsyncRT_DeviceContext_HtoD_async(
     const DragonContext *ctx, const DragonBuffer *dst, const void *src) {
     if (!ctx || !dst) return errf("HtoD_async: null argument");
-    cl_int e = clEnqueueWriteBuffer(ctx->defaultStream->q, dst->mem, CL_FALSE, 0,
+    if (getenv("DRAGONRT_TRACE_COPY"))
+        fprintf(stderr, "[dragonrt] HtoD_async\n");
+    /* CL_TRUE: see the transfer-coherency note above DtoD_async. */
+    cl_int e = clEnqueueWriteBuffer(ctx->defaultStream->q, dst->mem, CL_TRUE, 0,
                                     dst->bytes, src, 0, nullptr, nullptr);
     return e == CL_SUCCESS ? nullptr : errf("clEnqueueWriteBuffer failed: %d", e);
 }
@@ -528,7 +539,10 @@ __declspec(dllexport) const char *AsyncRT_DeviceContext_HtoD_async(
 __declspec(dllexport) const char *AsyncRT_DeviceContext_DtoH_async(
     const DragonContext *ctx, void *dst, const DragonBuffer *src) {
     if (!ctx || !src) return errf("DtoH_async: null argument");
-    cl_int e = clEnqueueReadBuffer(ctx->defaultStream->q, src->mem, CL_FALSE, 0,
+    if (getenv("DRAGONRT_TRACE_COPY"))
+        fprintf(stderr, "[dragonrt] DtoH_async\n");
+    /* CL_TRUE: see the transfer-coherency note above DtoD_async. */
+    cl_int e = clEnqueueReadBuffer(ctx->defaultStream->q, src->mem, CL_TRUE, 0,
                                    src->bytes, dst, 0, nullptr, nullptr);
     return e == CL_SUCCESS ? nullptr : errf("clEnqueueReadBuffer failed: %d", e);
 }
@@ -537,6 +551,44 @@ __declspec(dllexport) const char *AsyncRT_DeviceContext_DtoD_async(
     const DragonContext *ctx, const DragonBuffer *dst, const DragonBuffer *src) {
     if (!ctx || !dst || !src) return errf("DtoD_async: null argument");
     size_t n = dst->bytes < src->bytes ? dst->bytes : src->bytes;
+    if (getenv("DRAGONRT_TRACE_COPY"))
+        fprintf(stderr,
+                "[dragonrt] DtoD dst{mem=%p host=%p %zub} src{mem=%p host=%p "
+                "%zub} n=%zu\n",
+                (void *)dst->mem, dst->hostPtr, dst->bytes, (void *)src->mem,
+                src->hostPtr, src->bytes, n);
+
+    /* Transfer coherency on OpenCLOn12, measured 2026-08-20: with CL_FALSE,
+     * a WriteBuffer followed by an NDRange on the same in-order queue hands
+     * the kernel stale data (most of the buffer), and even with clFinish
+     * between them the first 16 bytes arrive corrupted. Every host-touching
+     * transfer is therefore blocking (CL_TRUE). The ABI's _async contract is
+     * still honoured -- the caller synchronizes before reading results -- so
+     * this trades copy/compute overlap we were not using for correctness.
+     */
+    /* The stdlib evolved past the ABI spec here: every buffer-to-buffer copy
+     * -- including host<->device -- now arrives through this one entry point,
+     * and a host buffer carries hostPtr with mem null. Dispatch on shape
+     * rather than assuming two cl_mems, or the copy dies with
+     * CL_INVALID_MEM_OBJECT (-38). */
+    if (src->hostPtr && dst->hostPtr) {
+        memcpy(dst->hostPtr, src->hostPtr, n);
+        return nullptr;
+    }
+    if (src->hostPtr) {
+        cl_int e = clEnqueueWriteBuffer(ctx->defaultStream->q, dst->mem,
+                                        CL_TRUE, 0, n, src->hostPtr, 0,
+                                        nullptr, nullptr);
+        return e == CL_SUCCESS ? nullptr
+                               : errf("clEnqueueWriteBuffer failed: %d", e);
+    }
+    if (dst->hostPtr) {
+        cl_int e = clEnqueueReadBuffer(ctx->defaultStream->q, src->mem,
+                                       CL_TRUE, 0, n, dst->hostPtr, 0,
+                                       nullptr, nullptr);
+        return e == CL_SUCCESS ? nullptr
+                               : errf("clEnqueueReadBuffer failed: %d", e);
+    }
     cl_int e = clEnqueueCopyBuffer(ctx->defaultStream->q, src->mem, dst->mem, 0, 0, n,
                                    0, nullptr, nullptr);
     return e == CL_SUCCESS ? nullptr : errf("clEnqueueCopyBuffer failed: %d", e);
@@ -641,44 +693,6 @@ __declspec(dllexport) const char *AsyncRT_DeviceContext_loadFunction(
         }
     }
 
-    /* TEMPORARY BRIDGE (2026-08-20): the Mojo compiler currently emits kernel
-     * pointer parameters with Function storage class (LLVM addrspace(0) maps
-     * there), which is invalid for a kernel argument and makes clCreateKernel
-     * fail with -5. Until the compiler emits CrossWorkgroup (addrspace(1))
-     * params, rewrite the pointer types here. Root-cause analysis and the
-     * verifying experiment: DRAGONMAX-JOURNAL.md 2026-08-20; the checker rule
-     * lives in dragon/probe/spv_tool.py.
-     *
-     * Guard: skipped entirely if the module declares ANY Function-storage
-     * OpVariable (allocas share these pointer types; a blanket flip would
-     * corrupt them). Today's kernels have none. DRAGONRT_NO_SPV_FIXUP=1
-     * disables. Delete this block once the compiler fix lands. */
-    std::vector<uint32_t> fixedWords;
-    if (isSpirv && dataLen % 4 == 0 && !getenv("DRAGONRT_NO_SPV_FIXUP")) {
-        const uint32_t *w = reinterpret_cast<const uint32_t *>(data);
-        size_t nw = dataLen / 4;
-        bool hasFunctionVar = false;
-        for (size_t i = 5; i + 3 < nw;) {
-            uint32_t wc = w[i] >> 16, opc = w[i] & 0xFFFFu;
-            if (!wc) break;
-            if (opc == 59 && w[i + 3] == 7) { hasFunctionVar = true; break; }
-            i += wc;
-        }
-        if (!hasFunctionVar) {
-            for (size_t i = 5; i + 2 < nw;) {
-                uint32_t wc = w[i] >> 16, opc = w[i] & 0xFFFFu;
-                if (!wc) break;
-                if (opc == 32 && w[i + 2] == 7) {  /* OpTypePointer Function */
-                    if (fixedWords.empty()) fixedWords.assign(w, w + nw);
-                    fixedWords[i + 2] = 5;         /* -> CrossWorkgroup */
-                }
-                i += wc;
-            }
-            if (!fixedWords.empty())
-                data = reinterpret_cast<const char *>(fixedWords.data());
-        }
-    }
-
     if (isSpirv) {
         if (!c->ilCreate)
             return errf(
@@ -710,8 +724,27 @@ __declspec(dllexport) const char *AsyncRT_DeviceContext_loadFunction(
 
     cl_kernel k = clCreateKernel(prog, functionName, &err);
     if (err != CL_SUCCESS) {
+        /* The requested name is several hundred characters of Mojo mangling,
+         * so "not found" and "found but rejected" look identical from the
+         * error code alone. Report what the built program actually contains:
+         * an empty list means the translation dropped the entry point, a
+         * populated one means the names disagree. */
+        std::string names;
+        size_t n = 0;
+        if (clGetProgramInfo(prog, 0x1166 /* CL_PROGRAM_KERNEL_NAMES */, 0,
+                             nullptr, &n) == CL_SUCCESS && n) {
+            names.assign(n, ' ');
+            clGetProgramInfo(prog, 0x1166, n, &names[0], nullptr);
+        }
+        cl_uint count = 0;
+        clGetProgramInfo(prog, 0x1167 /* CL_PROGRAM_NUM_KERNELS */,
+                         sizeof(count), &count, nullptr);
         clReleaseProgram(prog);
-        return errf("clCreateKernel('%s') failed: %d", functionName, err);
+        return errf("clCreateKernel failed: %d\n"
+                    "  wanted (%zu chars): %s\n"
+                    "  program has %u kernel(s): %s",
+                    err, strlen(functionName), functionName, count,
+                    names.empty() ? "(none)" : names.c_str());
     }
 
     auto *f = new DragonFunction();
@@ -749,8 +782,18 @@ __declspec(dllexport) const char *AsyncRT_DeviceContext_enqueueFunctionDirect(
     uint32_t argCount, uint64_t *argSizes) {
     if (!ctx || !func) return errf("enqueueFunctionDirect: null argument");
 
+    /* DRAGONRT_TRACE_ARGS: what the host actually handed us, per argument.
+     * The sizes are the half that is easy to get wrong and impossible to see:
+     * a null argSizes silently makes every argument pointer-sized, which is
+     * right for buffers and wrong for scalars, and shows up only as
+     * CL_INVALID_ARG_SIZE on whichever argument happens to be a scalar. */
+    if (getenv("DRAGONRT_TRACE_ARGS"))
+        fprintf(stderr, "[dragonrt] argCount=%u argSizes=%p\n", argCount,
+                (void *)argSizes);
     for (uint32_t i = 0; i < argCount; ++i) {
         size_t sz = argSizes ? (size_t)argSizes[i] : sizeof(void *);
+        if (getenv("DRAGONRT_TRACE_ARGS"))
+            fprintf(stderr, "[dragonrt]   arg %u size %zu\n", i, sz);
         cl_int e = clSetKernelArg(func->kern, i, sz, args[i]);
         if (e != CL_SUCCESS)
             return errf("clSetKernelArg(%u, size=%zu) failed: %d", i, sz, e);

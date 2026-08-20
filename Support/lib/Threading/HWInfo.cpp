@@ -30,7 +30,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <sched.h>
 #include <string>
 #include <system_error>
 #include <tuple>
@@ -39,10 +38,21 @@
 
 #ifdef _MSC_VER
 #include "llvm/Support/WindowsError.h"
-#include <cpuid.h>
+
+// windows.h has to come first: iphlpapi.h uses USHORT, GUID and friends via the
+// SDK's own ifdef.h without including anything that defines them, so listing it
+// alphabetically ahead of windows.h fails with a run of unknown type names.
+#include <windows.h>
+
 #include <intrin.h>
 #include <iphlpapi.h>
-#include <windows.h>
+
+// cpuid.h is x86 only and errors out on any other architecture. _MSC_VER says
+// the compiler is MSVC-compatible, not that the target is x86, and clang
+// defines it when targeting the MSVC ABI on ARM64 too.
+#if defined(_M_IX86) || defined(_M_X64)
+#include <cpuid.h>
+#endif
 #else
 #include <ifaddrs.h>
 #include <sys/socket.h>
@@ -65,6 +75,10 @@ using namespace M;
 
 namespace {
 #if HAVE_LINUX_X86_SYSTEM_INFO
+// cpu_set_t, CPU_ISSET and sched_getaffinity. Every use sits inside one of
+// these guards, so the include belongs here rather than with the standard
+// headers, where it broke any platform without sched.h.
+#include <sched.h>
 /// Function is very similar to what linux uses. We will mainly use
 /// this to detect P and E cores on x86.
 static inline void native_cpuid(unsigned int *eax, unsigned int *ebx,
@@ -531,7 +545,8 @@ std::vector<std::string> M::localMACs() {
   if (dwStatus == ERROR_SUCCESS) {
     PIP_ADAPTER_INFO pAdapterInfo = AdapterInfo;
     while (pAdapterInfo) {
-      macs.emplace_back(bytesToHexStr(pAdapterInfo->Address, pAdapterInfo->AddressLength);
+      macs.emplace_back(
+          bytesToHexStr(pAdapterInfo->Address, pAdapterInfo->AddressLength));
       pAdapterInfo = pAdapterInfo->Next;
     }
   }

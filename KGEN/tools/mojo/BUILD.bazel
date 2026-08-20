@@ -88,6 +88,15 @@ _MOJO_LINKOPTS = select({
         "-Wl,--export-dynamic-symbol=__jit_debug_*",
         "-Wl,--export-dynamic-symbol=mlir*",
     ],
+    # System libraries the Windows build needs at the final link:
+    #   ws2_32   Debug/RPCClient.cpp talks to the debug server over a socket,
+    #            and the sockets API is not in libc here.
+    #   normaliz curl is built with USE_WIN32_IDN, which resolves IdnToAscii
+    #            and IdnToUnicode from this library.
+    "@platforms//os:windows": [
+        "-lws2_32",
+        "-lnormaliz",
+    ],
     "//conditions:default": [],
 })
 

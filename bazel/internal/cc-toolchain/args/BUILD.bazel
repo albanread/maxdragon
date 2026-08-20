@@ -16,6 +16,16 @@ cc_args(
     ],
     data = [
         "//bazel/internal/cc-toolchain/tools:resource_directory_filegroup",
+        # Anchor for the LLVM overlay's relative symlinks. The @llvm-project
+        # repo materialises as symlinks like `llvm -> ..\+llvm_source+llvm-raw\llvm`,
+        # and Windows resolves a relative symlink LEXICALLY against the path
+        # used to reach it. Actions reach the repo through
+        # execroot/_main/external/, so `..` must find +llvm_source+llvm-raw
+        # THERE -- but Bazel only plants a repo into that forest if one of its
+        # files is an action input. This one file is that input. Remove it and
+        # every freshly-keyed LLVM compile fails with "no such file or
+        # directory" on a source that visibly exists.
+        "@llvm-raw//:README.md",
     ],
     format = {
         "resource_dir": "//bazel/internal/cc-toolchain/tools:resource_directory_filegroup",
@@ -156,6 +166,19 @@ cc_args(
         "@platforms//os:windows": [],
         "//conditions:default": ["-fPIC"],
     }) + select({
+        # windows.h defines min and max as function-like macros, which breaks
+        # any use of std::numeric_limits<T>::max() and std::min/std::max in
+        # every header that transitively includes it. NOMINMAX is the standard
+        # remedy and belongs here rather than per-target, since it has to hold
+        # for third-party code too. WIN32_LEAN_AND_MEAN drops the rarely-needed
+        # sub-headers, which cuts both compile time and the number of macros
+        # leaking into the global namespace.
+        "@platforms//os:windows": [
+            "-DNOMINMAX",
+            "-DWIN32_LEAN_AND_MEAN",
+        ],
+        "//conditions:default": [],
+    }) + select({
         # On Windows the MSVC headers select the matching CRT import library
         # through #pragma comment(lib, ...), which is exactly what -fno-autolink
         # suppresses. Leaving it off lets the debug/release and static/dynamic
@@ -163,6 +186,20 @@ cc_args(
         # being pinned by hand.
         "@platforms//os:windows": [],
         "//conditions:default": ["-fno-autolink"],
+    }) + select({
+        # The dynamic CRT, and this is a correctness requirement, not a
+        # packaging preference. Clang's default for MSVC targets is the static
+        # CRT, which gives mojo.exe and every Globals DLL a private heap. The
+        # Globals DLLs exist precisely so that one allocator serves the whole
+        # process; with per-module heaps, any std::string, shared_ptr control
+        # block or vector that is allocated in one module and released in
+        # another frees into the wrong heap. The damage surfaces as
+        # nondeterministic 0xC0000374/0xC0000409 aborts at process teardown,
+        # after the compiler has already written its output. One shared
+        # ucrtbase heap restores the topology the code was written against: a
+        # single allocator per process, as on Linux and macOS.
+        "@platforms//os:windows": ["-fms-runtime-lib=dll"],
+        "//conditions:default": [],
     }),
 )
 
@@ -220,7 +257,50 @@ cc_args(
         ],
         # lld-link takes none of the ELF or Mach-O options above, and the CRT
         # import libraries arrive via the autolink pragmas in the MSVC headers.
-        "@platforms//os:windows": [],
+        #
+        # /MACHINE is stated rather than left to inference. lld-link otherwise
+        # assumed x64 and rejected every input it was given, reporting
+        # "machine type arm64 conflicts with x64" against objects that were all
+        # correctly ARM64, including the CRT's own.
+        #
+        # The dynamic CRT has to be assembled by hand here, because two
+        # mechanisms that should each deliver it both fail:
+        #
+        #  1. clang 22's MSVC linker job never consults -fms-runtime-lib (that
+        #     flag only shapes compiles) and hardcodes -defaultlib:libcmt,
+        #     injecting the static CRT into every link. /NODEFAULTLIB vetoes
+        #     that by name. The flag is still stated for the day the driver
+        #     learns to read it.
+        #
+        #  2. The DEFAULTLIB directives that -fms-runtime-lib=dll embeds in
+        #     every object were demonstrably not honored for objects packed
+        #     into .lib archives: msvcprt symbols (std::time_get) came up
+        #     undefined even though the referencing object carried
+        #     DEFAULTLIB:msvcprt.lib in its .drectve. So the full set is
+        #     stated explicitly: msvcrt (startup + vcruntime140 imports),
+        #     msvcprt (msvcp140, the C++ standard library), ucrt (ucrtbase,
+        #     the C runtime and THE process heap), vcruntime.
+        #
+        # Mixing in any static-CRT member instead surfaces as undefined
+        # __imp_ symbols for whatever small functions nothing pulled
+        # statically (strtoull, isxdigit, _fpclass), or as duplicate symbols
+        # against ucrt.lib, depending on which side wins the race.
+        "@platforms//os:windows": [
+            "-Wl,/MACHINE:ARM64",
+            "-fms-runtime-lib=dll",
+            "-Wl,/NODEFAULTLIB:libcmt.lib",
+            "-Wl,/DEFAULTLIB:msvcrt.lib",
+            "-Wl,/DEFAULTLIB:msvcprt.lib",
+            "-Wl,/DEFAULTLIB:ucrt.lib",
+            "-Wl,/DEFAULTLIB:vcruntime.lib",
+            # getBinaryID() is PE's answer to the ELF build-id note: the
+            # CodeView RSDS GUID. Links carry no debug directory by default,
+            # so every `mojo build` died with "No build id note found" when
+            # it fingerprinted itself for MEF cache invalidation. /BUILD-ID
+            # writes a content-hash RSDS record without producing a PDB —
+            # this is Linux's --build-id=md5 line above, in COFF spelling.
+            "-Wl,/BUILD-ID",
+        ],
     }) + select({
         # Sanitizers are split across multiple libraries, some of which aren't linked to shared libraries
         "//:asan_linux": ["-Wl,-z,undefs"],
@@ -286,6 +366,10 @@ cc_args(
     args = select({
         "@platforms//os:linux": ["-Wl,--gc-sections"],
         "@platforms//os:macos": ["-Wl,-dead_strip"],
+        # /OPT:REF is lld-link's equivalent dead-strip. It is already the
+        # default for a release link, but not once /DEBUG is present, so state
+        # it rather than depend on that interaction.
+        "@platforms//os:windows": ["-Wl,/OPT:REF"],
     }),
 )
 

@@ -1,5 +1,6 @@
 load("@rules_cc//cc:cc_import.bzl", "cc_import")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc/toolchains:args.bzl", "cc_args")
 load("@rules_cc//cc/toolchains:artifacts.bzl", "cc_artifact_name_pattern")
 load("@rules_cc//cc/toolchains:make_variable.bzl", "cc_make_variable")
 load("@rules_cc//cc/toolchains:toolchain.bzl", "cc_toolchain")
@@ -50,8 +51,8 @@ cc_sysroot(
             "//:linux_x86_64": [":linux_sysroot_x86_64"],
             "//:linux_aarch64": [":linux_sysroot_aarch64"],
             "//:windows_arm64": [
-                "@sysroot-windows-arm64//:includes",
-                "@sysroot-windows-arm64//:libs",
+                ":windows_arm64_includes",
+                ":windows_arm64_libs",
             ],
             "@platforms//os:macos": [":macos_sysroot"],
         }) + [
@@ -94,6 +95,33 @@ cc_sysroot(
             "//:modular_config_tsan": ["//bazel/internal/cc-toolchain/features:tsan"],
             "//:modular_config_ubsan": ["//bazel/internal/cc-toolchain/features:ubsan"],
             "//conditions:default": [],
+        }) + select({
+            # supports_start_end_lib makes Bazel hand the linker loose object
+            # files wrapped in --start-lib/--end-lib rather than archives. That
+            # is an ELF linker feature; lld-link has no such flag, and the only
+            # effect here is that a link gets one argument per object file.
+            # AsyncRTRuntimeGlobals.dll came to 2,339 arguments and blew past
+            # CreateProcess's 32767 character limit. Archives keep it to one
+            # argument per library.
+            "@platforms//os:windows": [],
+            "//conditions:default": [
+                # https://github.com/bazelbuild/rules_cc/issues/322
+                "//bazel/internal/cc-toolchain/features:supports_start_end_lib",
+            ],
+        }) + select({
+            # Both limits bite on Windows and neither exists elsewhere.
+            # compiler_param_file keeps compile actions under cmd.exe's 8191
+            # character ceiling, and linker_param_file keeps links under the
+            # 32767 that CreateProcess itself imposes: llvm-tblgen links with
+            # over 400 arguments of long output paths and failed with a bare
+            # exit -1, no diagnostic, which is what exceeding that limit looks
+            # like.
+            "@platforms//os:windows": [
+                "//bazel/internal/cc-toolchain/features:compiler_param_file",
+                "//bazel/internal/cc-toolchain/features:copy_dynamic_libraries_to_binary",
+                "@rules_cc//cc/toolchains/features/legacy:linker_param_file",
+            ],
+            "//conditions:default": [],
         }) + [
             # Features where order doesn't matter
             "//bazel/internal/cc-toolchain/features:archive_param_file",
@@ -110,7 +138,6 @@ cc_sysroot(
             "//bazel/internal/cc-toolchain/features:parse_headers_shim",
             "//bazel/internal/cc-toolchain/features:opt_feature",
             "@rules_cc//cc/toolchains/args:experimental_replace_legacy_action_config_features",
-            "//bazel/internal/cc-toolchain/features:supports_start_end_lib",  # https://github.com/bazelbuild/rules_cc/issues/322
             "//bazel/internal/cc-toolchain/args/interface-libraries",
         ],
         known_features = [
@@ -124,6 +151,7 @@ cc_sysroot(
             "//bazel/internal/cc-toolchain/features:layering_check",
             "//bazel/internal/cc-toolchain/features:use_module_maps",
             "//bazel/internal/cc-toolchain/features:parse_headers",
+            "//bazel/internal/cc-toolchain/features:compiler_param_file",
             "@rules_cc//cc/toolchains/args/generate_linkmap:feature",
             "@rules_cc//cc/toolchains/args/thin_lto:feature",
         ] + [
@@ -141,6 +169,16 @@ cc_sysroot(
         }),
         module_map = "//bazel/internal/cc-toolchain/tools:builtin_module_map",
         supports_header_parsing = True,
+        # This attribute, not the linker_param_file feature, is what actually
+        # makes Bazel spill link arguments to a params file. It defaults to
+        # False, which is harmless where a command line can be megabytes long,
+        # but on Windows CreateProcess refuses past 32767 characters and the
+        # failure is a bare exit -1 with no diagnostic. protoc links with 665
+        # arguments of long output paths and never had a chance.
+        supports_param_files = select({
+            "@platforms//os:windows": True,
+            "//conditions:default": False,
+        }),
         tags = [TOP_LEVEL_TAG],  # Used below, unclear why this is needed
         tool_map = "//bazel/internal/cc-toolchain/tools:{}_tools".format(platform),
     )
@@ -165,6 +203,124 @@ cc_make_variable(
     name = "macos_stack_frame",
     value = "-Wframe-larger-than=100000000 -Wno-vla",
     variable_name = "STACK_FRAME_UNLIMITED",
+)
+
+# There is no --sysroot for a windows-msvc target, so the MSVC and SDK headers
+# are passed as ordinary include flags. The paths are formatted from directory
+# targets rather than written literally: Bazel rejects absolute paths outside
+# the execution root, and allowlist_include_directories is what permits a system
+# include path to sit outside the sandbox at all.
+#
+# -isystem, deliberately, despite a known drawback.
+#
+# Bazel passes a target's own `includes` as -isystem for external repositories,
+# so the sysroot shares a search class with the project, and within a class the
+# first listed wins. These come from the toolchain and are emitted first, so an
+# SDK header shadows a project header of the same name. The UCRT ships share.h,
+# which displaces curl's own lib/share.h; that is patched in curl rather than
+# fixed here.
+#
+# -idirafter looks like the principled fix and was tried. It searches after -I
+# and -isystem, which does resolve the shadowing, but it also stops clang
+# associating these headers with the builtin module map, so layering_check
+# rejects every standard library include and the failure count went from 8 to
+# 1,696. Module attribution matters more than the occasional name collision.
+cc_args(
+    name = "windows_arm64_includes",
+    actions = [
+        "@rules_cc//cc/toolchains/actions:compile_actions",
+    ],
+    allowlist_include_directories = [
+        "@clang-windows-arm64//:include_dir",
+        "@sysroot-windows-arm64//vc_include:dir",
+        "@sysroot-windows-arm64//sdk_ucrt:dir",
+        "@sysroot-windows-arm64//sdk_shared:dir",
+        "@sysroot-windows-arm64//sdk_um:dir",
+        "@sysroot-windows-arm64//sdk_winrt:dir",
+    ],
+    args = [
+        # clang's own builtin headers must precede the MSVC ones. MSVC ships its
+        # own arm_neon.h, which declares the neon_* intrinsics as extern
+        # functions that only the Microsoft compiler intrinsifies, and defines
+        # uint8x16_t and friends as the __n128 *union* rather than a vector
+        # type. With vc_include searched first, #include <arm_neon.h> picked up
+        # Microsoft's, which is why NEON code across LLVM, abseil, BLAKE3 and
+        # boringssl either failed to compile on union arithmetic or linked with
+        # undefined neon_xtn, neon_umov and similar. -resource-dir alone does
+        # not fix this: clang searches its builtin include directory after
+        # -isystem paths, not before.
+        # The trailing subpath is required: :include_dir is declared in the
+        # repository root BUILD file, and bazel_skylib's directory reports the
+        # path of its package rather than of its srcs, so the placeholder alone
+        # expands to the repository root and the builtin headers are not found.
+        # lib/clang/22 is already hardcoded in clang.BUILD, so this adds no new
+        # version coupling.
+        "-isystem",
+        "{clang_include}/lib/clang/22/include",
+        "-isystem",
+        "{vc_include}",
+        "-isystem",
+        "{sdk_ucrt}",
+        "-isystem",
+        "{sdk_shared}",
+        "-isystem",
+        "{sdk_um}",
+        "-isystem",
+        "{sdk_winrt}",
+    ],
+    data = [
+        "@clang-windows-arm64//:include",
+        "@sysroot-windows-arm64//vc_include:files",
+        "@sysroot-windows-arm64//sdk_ucrt:files",
+        "@sysroot-windows-arm64//sdk_shared:files",
+        "@sysroot-windows-arm64//sdk_um:files",
+        "@sysroot-windows-arm64//sdk_winrt:files",
+    ],
+    format = {
+        "clang_include": "@clang-windows-arm64//:include_dir",
+        "vc_include": "@sysroot-windows-arm64//vc_include:dir",
+        "sdk_ucrt": "@sysroot-windows-arm64//sdk_ucrt:dir",
+        "sdk_shared": "@sysroot-windows-arm64//sdk_shared:dir",
+        "sdk_um": "@sysroot-windows-arm64//sdk_um:dir",
+        "sdk_winrt": "@sysroot-windows-arm64//sdk_winrt:dir",
+    },
+)
+
+cc_args(
+    name = "windows_arm64_libs",
+    actions = [
+        "@rules_cc//cc/toolchains/actions:link_actions",
+    ],
+    args = [
+        "-L{vc_lib}",
+        "-L{sdk_lib_ucrt}",
+        "-L{sdk_lib_um}",
+        # compiler-rt's builtins live outside the MSVC sysroot, in the clang
+        # distribution. clang adds them to its own links; Mojo drives the
+        # linker itself and inherits only what is stated here. Without them
+        # __divti3 and __modti3 -- 128-bit signed division and modulo, which
+        # the standard library reaches whenever an Int128 is formatted -- come
+        # up undefined.
+        #
+        # Named as a direct input rather than requested through /DEFAULTLIB: a
+        # default library is only consulted through the linker's search path,
+        # and that lookup did not resolve these even with the containing
+        # directory on -L. An explicit path removes the search from the
+        # equation.
+        "{clang_builtins_lib}/lib/clang/22/lib/windows/clang_rt.builtins-aarch64.lib",
+    ],
+    data = [
+        "@sysroot-windows-arm64//vc_lib:files",
+        "@sysroot-windows-arm64//sdk_lib_ucrt:files",
+        "@sysroot-windows-arm64//sdk_lib_um:files",
+        "@clang-windows-arm64//:builtins_lib_files",
+    ],
+    format = {
+        "vc_lib": "@sysroot-windows-arm64//vc_lib:dir",
+        "sdk_lib_ucrt": "@sysroot-windows-arm64//sdk_lib_ucrt:dir",
+        "sdk_lib_um": "@sysroot-windows-arm64//sdk_lib_um:dir",
+        "clang_builtins_lib": "@clang-windows-arm64//:builtins_lib_dir",
+    },
 )
 
 cc_artifact_name_pattern(

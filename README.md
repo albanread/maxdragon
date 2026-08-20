@@ -1,151 +1,625 @@
-# maxdragon
+# WINMOJO — Mojo 1.1 on native Windows ARM64
 
-*Mojo and MAX-class inference on Snapdragon hardware, on Windows on ARM.
-Nobody asked for this. Nobody is coming to help. It works anyway, mostly.*
+## Thanks, and a statement of intent
 
-This is a fork of [modular/modular](https://github.com/modular/modular)
-(Modular's original README lives on in the git history, cheerful as ever, with
-its banner and its rocket emoji). It is also a fork of
-[WINMOJO](https://github.com/albanread/WINMOJO), the project that ports the
-Mojo compiler itself to native Windows ARM64. This repo is the half WINMOJO
-deliberately left behind: the GPU, the NPU, the whole question of making a
-£350 IdeaCentre Mini do inference like it owes somebody money.
+Mojo is a serious piece of language engineering, and it was given away. Thanks
+are owed to Chris Lattner and the team at Modular who designed and built it, and
+to everyone who has contributed to the compiler and the standard library since.
 
-## The situation, stated calmly
+Open-sourcing the compiler and stdlib under Apache 2.0 — with a patent grant and
+no field-of-use restriction — is what makes a port like this one both legal and
+possible. It means someone can take the source, aim it at hardware the authors
+never targeted, and find out what happens. That is not the industry norm, and it
+is the reason this repository can exist at all.
 
-Modular's platform officially supports Linux and macOS. Their documentation
-says, in full: **"Windows: Not currently supported."** It does not say
-anything about Windows *on ARM*, in the way one does not bother posting a
-"no swimming" sign on the sun.
+What follows is not written in a spirit of celebration, and it would be dishonest
+to pretend otherwise.
 
-MAX is source-available. It is not source-complete. The graph engine
-(`max/python/max/_core`) ships as thirteen `.pyi` stub files whose build
-rules name a directory that has never existed in any public commit. The GPU
-device runtime — the 109 C functions every Mojo `DeviceContext` call lands on
-— is declared, beautifully documented in comments, and implemented nowhere you
-can see. The parts you would need to add a new hardware backend are precisely
-the parts that are missing. We checked. Twice, because the first time we
-didn't believe it either.
+This repository exists to run Mojo on my own hardware, to understand how it
+works, and to find out whether it is useful to me. It is not a tribute and not an
+advertisement. Much of what is recorded here — in this README and at far greater
+length in the [journal](PORT-JOURNAL.md) — is blunt about the language, the
+toolchain, and the licensing, and it will stay blunt wherever the evidence points
+that way. That is the point of the exercise rather than a failure of manners:
+**I am interested; I am not a fan.**
 
-Qualcomm, for their part, do not publish the Adreno shader ISA, ship an
-OpenCL driver that reports its own clock speed as **1 MHz**, and provide a
-second OpenCL platform (Microsoft's D3D12 shim) that claims to be the same
-GPU, so that selecting a device by name is a trap with your name on it.
+## What this is
 
-So: the compiler vendor doesn't support the OS, the OS vendor impersonates
-the GPU, the GPU vendor hides the ISA, and the engine we are nominally
-porting does not, in the meaningful sense, exist.
+**An unofficial, unsupported fork of [modular/modular](https://github.com/modular/modular)
+that ports the Mojo compiler and standard library to native Windows 11 on
+Snapdragon (ARM64) PCs.**
 
-We proceeded.
+No WSL. No emulation in the shipped binary. `mojo.exe` is a PE/COFF ARM64
+executable that compiles and runs `.mojo` files on the machine you are sitting at.
 
-## What actually works (measured, not hoped)
+> [!IMPORTANT]
+> This is not a Modular product and is not affiliated with, endorsed by, or
+> supported by Modular. Do not file issues about this fork on the upstream
+> repository. It carries no warranty and no support commitment of any kind.
+> If you need supported Mojo, use [the real thing](https://mojolang.org) on a
+> platform Modular actually ships for.
 
-This is the part that is only sad if you think about how it was obtained.
+| | |
+| --- | --- |
+| **Upstream** | `modular/modular` @ `f66d4d5` |
+| **Language version** | Mojo 1.1.0 — **frozen, see below** |
+| **Target** | `aarch64-pc-windows-msvc`, Windows 11, Snapdragon X |
+| **Scope** | Mojo compiler (KGEN), C++ substrate, stdlib, CPU codegen |
+| **Out of scope** | MAX (kernels, graph, engine, serve), GPU backends |
+| **Licence** | Apache 2.0 with LLVM exceptions (compiler & stdlib) |
 
-| Thing | Result |
-|---|---|
-| MAX's device ABI, reimplemented over OpenCL (`dragon/runtime/dragonrt.dll`) | passes its raw-ABI test: saxpy on the Adreno X1-45, **all 4096 elements exact** |
-| Our tiled matmul on the Adreno | **41.9 GFLOP/s**, 3.37× a threaded CPU baseline, verified exact |
-| Real QNN graphs on the Hexagon NPU | run; our generated models match the CPU to **0.062%** |
-| 1 GiB of weights on the NPU | executes, **4.1× faster than the CPU** — and the advantage grows with size |
-| The device ABI, fully specified | 109 symbols extracted from Modular's own bindings, 94 with recovered C prototypes, regenerated mechanically so it cannot drift |
-| Adreno as a first-class Mojo target | stdlib target (six edit sites), `adreno` plugin, and a SPIR-V traits/lowering/backend trio in KGEN — written against interfaces read in full |
-| The offload pipeline | traced end to end with file:line receipts; **no missing component**. The compiler embeds the SPIR-V in your executable; our runtime hands it to the driver |
+## The irony
 
-The route, since no one will ever draw it on a conference slide: Mojo source
-→ KGEN (`--target-accelerator adreno-x1`) → LLVM's SPIR-V backend → bytes
-baked into the `.exe` → `dragonrt.dll` → Qualcomm's driver compiler → silicon.
-Every arrow except the last is open source in this repository. The last one is
-a driver, which is the ordinary kind of closed, the kind we can live with.
+Mojo exists because AI compute is heterogeneous. Its entire premise is that one
+source file should specialize to whatever silicon you point it at — CPUs, GPUs,
+accelerators, NPUs.
 
-## A partial list of things that lied to us
+Snapdragon X is an AI PC. It has a capable ARM64 CPU, an Adreno GPU, and a
+Hexagon NPU sitting right there. It is precisely the sort of heterogeneous
+consumer silicon Mojo was designed to talk to.
 
-Kept because the lies were the actual work.
+Mojo does not support it. Modular ships Linux x86-64, Linux ARM64, and macOS
+ARM64. On Windows the official answer is WSL — a Linux VM, on a machine whose
+native ISA is already ARM64, to run a language whose reason for existing is
+meeting hardware where it lives.
 
-- `uname -m` on this machine says `x86_64`. The machine is not x86_64.
-- The Adreno driver reports 1 MHz. It is not running at 1 MHz.
-- Two OpenCL platforms report the same GPU. One of them is Microsoft in a
-  trench coat.
-- The GPU's "warp size" is 64. Also 128. Per kernel. On the same device.
-  Nobody knows why; we wrote the experiment, and the hypothesis it was
-  designed to confirm, it refuted.
-- The NPU appeared to die and need a reboot. It was fine. The *runtime* had
-  stopped opening sessions, and our control test used the same runtime, which
-  is how you prove a hardware fault that does not exist. A different QNN
-  runtime on the same silicon ran a 128 MiB model in 555 ms while we were
-  composing the obituary.
-- The "128 MiB NPU ceiling" produced by that episode was also fiction. The
-  real ceiling, if one exists, is somewhere past 1 GiB. We stopped looking
-  when the number got embarrassing for the doubters, i.e. us.
-- QnnGpu's unit test passes. QnnGpu cannot run an actual graph on this
-  driver. The documented escape hatch is validated by the config schema and
-  then rejected by the DLL that reads the config, a two-layer system in which
-  each layer vetoes the other.
-- `cmd.exe`'s `set VAR=value && next` puts the space *into the variable*,
-  which becomes an include path with a trailing space, which becomes
-  `fatal error: 'QnnInterface.h' file not found`, which is a quoting bug
-  wearing a missing-header costume.
-- The repository's own `.gitignore` contains `target/`, for Rust, a language
-  this repository does not contain, and on Windows it silently ate our
-  compiler backend, twice, before we noticed the commits were getting lighter.
-- The vendored LLVM source tree vanished from disk *between two grep
-  commands* while we were verifying an enum name. Bazel giveth.
+This fork exists to close that gap for one machine. That is the whole ambition.
+It is not a bid to become the Windows port.
 
-Every one of these is documented properly in
-[`DRAGONMAX-JOURNAL.md`](DRAGONMAX-JOURNAL.md), along with the four separate
-occasions on which we wrote down a confident conclusion and later had to
-retract it. The journal does not flatter us. That is what it is for.
+## The freeze
 
-## Current status
+**When this port is complete it stays at Mojo 1.1.0. It does not track upstream.**
 
-The GPU line is **code-complete and waiting**. Waiting, specifically, for
-WINMOJO to get the Mojo compiler itself building on Windows ARM64 (its gate
-G3), at which point our backend gets its first compile ever and either works
-or fails in one of four pre-triaged, one-line-fix ways. We wrote a compiler
-backend for a compiler that cannot yet compile it. This is either faith or
-project management; the journal declines to say which.
+That is a deliberate design decision, not neglect. A solo port cannot chase a
+language that redefines itself every few weeks: every upstream churn re-keys the
+build, invalidates substrate work, and moves the finish line. Pinning to a single
+commit turns an infinite task into a finite one.
 
-If you are here to integrate it: read [`INTEGRATEME.md`](INTEGRATEME.md),
-which was written for you, specifically, with love, and commands you can
-paste. The formal contract is [`dragon/HANDOFF.md`](dragon/HANDOFF.md). The
-finish line is one ordinary Mojo file —
-[`dragon/mojo-tests/adreno_saxpy.mojo`](dragon/mojo-tests/adreno_saxpy.mojo) —
-printing `PASS`. It contains nothing platform-specific, because the entire
-point was that Mojo code should not have to know any of the above happened.
+What that buys:
 
-The NPU line continues independently — it never needed the compiler. Next up
-there: int8 throughput (the "45 TOPS" the brochure meant) and AOT context
-binaries for real models.
+- **A finishable artifact.** The target is fixed, so "done" is a state that can
+  actually be reached and then verified.
+- **A stable language to write against.** Code written for this compiler keeps
+  compiling. No deprecation treadmill, no syntax that evaporates next release.
+- **Reproducibility.** One upstream commit, one toolchain, one answer to "why did
+  this change?"
 
-## Repository map
+What that costs, stated plainly: no upstream bug fixes, no new language features,
+no new stdlib APIs, and a growing distance from whatever Mojo becomes. This is a
+preserved snapshot of a language at version 1, not a living distribution. If that
+trade is wrong for you, this fork is wrong for you.
 
-| Where | What |
-|---|---|
-| `dragon/` | everything we added: runtime, probes, benchmarks, QNN tools, design docs |
-| `dragon/runtime/` | the MAX device ABI over OpenCL, its generated spec, its test |
-| `dragon/qnn/` | NPU model generation, the build recipe, the wedge-vs-ceiling discipline |
-| `KGEN/lib/**/Spirv/` | the SPIR-V compiler trio |
-| `DRAGONMAX-JOURNAL.md` | the full record, mistakes included |
-| `INTEGRATEME.md` | the runbook for the compiler team |
+## Status
 
-## License
+Full stdlib test census, native Windows ARM64:
 
-Apache 2.0 with LLVM exceptions, per the header on every one of the 4,566
-source files — which is the license that matters, and which Modular's own
-[Community License](https://www.modular.com/legal/community) concedes
-"controls over these Terms in the event of any conflict." The Community
-License governs Modular's *binary* distributions, none of which this project
-has ever downloaded, possessed, or run — a fact we maintain on purpose. The
-full close reading, including the version of the license that changed the day
-before we forked and what replaced it, is in
-[`dragon/design/LICENSE-ANALYSIS.md`](dragon/design/LICENSE-ANALYSIS.md). Our
-additions are as open as we could make them; the only closed thing in the
-chain is the GPU driver, and we have made our peace with that, in the way one
-makes peace with weather.
+| Result | Targets |
+| --- | --- |
+| pass | **258** |
+| fail | 52 |
+| fail to build | 4 |
+| skipped (platform-gated) | 55 |
+| **total** | **369** |
+
+`mojo.exe` builds, links, parses, compiles and runs Mojo. The stdlib compiles to
+`std.mojoc` with warnings only and required no source changes. The remaining
+failures are the current work; see [PORT-JOURNAL.md](PORT-JOURNAL.md) for the
+running record, which is where the real detail lives.
+
+### What works, and what does not
+
+| | State |
+| --- | --- |
+| `mojo build` (AOT) | **works** — produces a running native ARM64 PE/COFF binary |
+| `mojo run` / REPL (JIT) | **cannot work** — LLVM has no COFF/ARM64 JITLink backend |
+| native CPU target | **broken** — `oryon-1` crashes the compiler, see below |
+| standalone driver | works only with two environment overrides, see below |
+
+Two defects had to be fixed before any Mojo program could be compiled and run on
+this platform. The COFF machine type was hardcoded to `/machine:X64` — carrying
+upstream's comment *"Mojo only supports X86_64 COFF right now"* — so the linker
+was handed ARM64 objects and told they were x86-64. With that derived from the
+target triple, the link reached symbol resolution and failed on `write` and
+`dup`: the stdlib's FFI calls POSIX names that the MSVC CRT exports
+underscore-prefixed, and `oldnames.lib` supplies the aliases that `cl.exe` would
+normally request through a `/DEFAULTLIB` directive Mojo never emits.
+
+Three gaps remain worked around rather than fixed:
+
+- **The compiler cannot target this machine's CPU.** `oryon-1` — the actual
+  Snapdragon X core — hits an assertion in LLVM's AArch64 scheduling model
+  (`TargetSchedule.cpp:227`, "incomplete machine model") and aborts codegen
+  outright. The benchmarks below were compiled for `neoverse-n1` instead; both
+  are ARMv8-A AArch64 and neither has SVE, so the substitution is sound and the
+  code is correct and native — but it is scheduled for a narrower core than the
+  one running it. `neoverse-n1` is not a general escape either: it aborts the
+  same way on some load/store-pair sequences, so AOT builds of the Windows
+  examples use `--target-cpu generic`, which selects no scheduling model at all.
+  A compiler that crashes on its own host CPU is a defect, not a footnote, and
+  it is the next thing to fix.
+- **The compiler_rt default path is Linux-shaped**
+  (`lib/libKGENCompilerRTShared.so`), so `MODULAR_MOJO_MAX_COMPILERRT_PATH` must
+  be set for a standalone invocation. Bazel-driven builds resolve it via runfiles
+  and are unaffected.
+- **The linker driver must be named explicitly** through
+  `MODULAR_MOJO_MAX_LINKER_DRIVER`, since the driver emits MSVC-style flags and
+  looks for `link.exe` on PATH.
+
+### First benchmarks
+
+Six programs, transliterated line-for-line into Mojo, C and Python, run on one
+Snapdragon X desktop. C is clang 22.1.4 at `-O3` — the same LLVM version Mojo
+itself uses — and both were given the same `-mcpu`. Times in milliseconds,
+in-process, excluding startup.
+
+| Benchmark | Mojo | C | CPython 3.12 | vs C |
+| --- | --- | --- | --- | --- |
+| fib30 · recursion | 2 | 2 | 165 | 1.00× |
+| mandelbrot · float | 21 | 19 | 1157 | 1.11× |
+| collatz · int div | 70 | 24 | 2284 | 2.92× |
+| sieve5m · memory | 27 | 13 | 1167 | 2.08× |
+| matmul256 · cache | 6 | 3 | 2277 | 2.00× |
+| qsort1m · branchy | 77 | 67 | 2478 | 1.15× |
+| **geometric mean** | | | | **1.58×** |
+
+Mojo comes out around **65× faster than CPython and 1.6× slower than C**. Only
+the second number means anything: beating a bytecode interpreter by two orders of
+magnitude is the entry fee for any compiled language, not a result worth
+reporting. The spread against C — 1.0× on pure call overhead, 2.9× on a tight
+integer-division loop — is where the actual information is.
+
+Caveats that matter before anyone quotes these: the CPU target is wrong for both
+languages (above); `fib30` and `matmul256` are near timer resolution; mandelbrot
+is numerically chaotic and all three languages return slightly different counts,
+so it measures speed and not correctness; and none of Mojo's actual selling
+points — SIMD, `parallelize`, GPU — are exercised at all. This is scalar
+single-threaded codegen, the part Mojo shares with every other LLVM language.
+
+### The compiler knows Windows
+
+![An animated Julia set, rendered by a Mojo pixel shader](docs/images/julia.png)
+
+That window is a native Mojo binary. It registers a window class whose window
+procedure is a Mojo function Windows calls directly, compiles the HLSL below it
+at run time with `D3DCompile`, drives the whole Direct3D 11 pipeline through
+COM, and holds 60fps against the display's measured refresh rate. The full
+source is [examples/win32/d3djulia.mojo](examples/win32/d3djulia.mojo); what
+makes it unusual is what is *not* in it. No vtable slot numbers, no GUIDs, no
+struct sizes, no field offsets. Every Windows-shaped fact is a query the
+compiler answers while compiling:
+
+```mojo
+# The layout is checked against Windows itself -- a disagreement is a build
+# failure, not memory corruption at the first call.
+comptime assert (
+    size_of[DXGI_SWAP_CHAIN_DESC]()
+    == winkb_struct_size["DXGI_SWAP_CHAIN_DESC"]()
+), "DXGI_SWAP_CHAIN_DESC does not match Windows"
+
+# A COM call, by interface and method name. The vtable slot -- 13, but nobody
+# typed that -- is looked up in the metadata during elaboration.
+var draw = com_method_of[
+    def (OpaquePointer[MutUntrackedOrigin], UInt32, UInt32)
+        thin abi("C") -> NoneType,
+    "ID3D11DeviceContext", "Draw",
+](context)
+
+# The window procedure is a Mojo function with the C ABI; Windows calls it
+# for every message the window receives.
+@export("mojo_wndproc")
+def mojo_wndproc(hwnd: Int, message: UInt32, wparam: Int, lparam: Int
+) abi("C") -> Int:
+    ...
+```
+
+How that works: this fork's compiler carries a copy of the Win32 API
+metadata -- 18,271 functions, 15,764 structs with byte-exact field offsets,
+7,912 COM interfaces with their IIDs and vtable orders -- as a SQLite
+database, and the elaborator can read it. `winkb_query` is a compile-time
+parameter expression alongside `get_env`, the same shape: a name goes in
+during elaboration, a constant comes out, and the query leaves no trace in
+the binary. `--emit asm` on a COM call shows exactly what a C++ compiler
+emits for `p->Release()`:
+
+```asm
+ldr  x8, [x19]        ; vtable from *this
+mov  x0, x19          ; this
+ldr  x8, [x8, #16]    ; slot 2 x 8 bytes -- the query, folded to an immediate
+blr  x8
+```
+
+The database is a declared toolchain input, so its content is part of every
+compile action's cache key, and `winkb_db_hash()` folds its SHA-256 into a
+binary at elaboration -- a build record can state exactly which metadata
+revision produced it. Releases ship the database beside the compiler as
+`lib/windows_api.db`.
+
+On top of the queries sit three small pieces in the standard library:
+`com_method_of` (the dispatcher above), `ComPtr` (COM refcounting mapped onto
+Mojo ownership: copy is AddRef, destruction is Release, and a move is
+provably neither -- with `adopt=` for pre-counted out-parameters and
+`query_interface[T]` inferring the IID from the type), and `Win32Module`
+(process-lifetime DLL cache). The metadata plumbing is
+[std/sys/_winkb.mojo](mojo/stdlib/std/sys/_winkb.mojo); the compiler side is
+`winkb_query` in the KGEN elaborator.
+
+### A standard library for Windows
+
+![The std.windows tour, run on this machine](docs/images/windows_tour.png)
+
+Upstream Mojo does not support Windows, so it has no Windows library either:
+`os` and `pathlib` are written against POSIX, and the parts that cannot be
+emulated are simply absent. A POSIX shim in the compiler runtime covers the
+names Mojo itself calls. `std/windows/` is the other half — the things a
+Windows program actually wants.
+
+| Module | |
+| --- | --- |
+| `core` | `WideString` (UTF-8 ↔ UTF-16), decoded errors, owning `Handle` |
+| `registry` | `RegKey` open/create, typed get/set, subkey and value enumeration |
+| `shell` | `known_folder`, `expand_environment`, `message_box` |
+| `fs` | attributes, directory listing with metadata, path services, copy/move/delete, free space |
+| `sysinfo` | OS version, computer and user, memory, processors, uptime, performance counter |
+| `console` | UTF-8 code page, ANSI escape handling, window size, title |
+| `time` | FILETIME ↔ Unix, local calendar time, file timestamps |
+| `process` | `run`, `run_captured`, environment, argument quoting, `is_elevated` |
+| `clipboard` | get and set text |
+
+Two lines of that screenshot are the argument for the module existing at all.
+
+`desktop` is `C:\Users\alban\OneDrive\Desktop`. Any program that had built
+that path from `%USERPROFILE%\Desktop` — the obvious thing, and what a
+POSIX-shaped port does — would be wrong on this machine, and on every
+OneDrive-backed or domain-joined machine. `SHGetKnownFolderPath` is not a
+convenience over the environment variable; it is the only correct answer.
+
+`product` says **Windows 10 Home** on a Windows 11 box. `ProductName` in the
+registry has lied since Windows 11 shipped, which is why `windows_version()`
+goes to `RtlGetVersion` in ntdll and reports the build number — 26200 is 25H2,
+26100 is 24H2, and the marketing name is not load-bearing. `GetVersionExW`
+would have lied differently: it reports 6.2 to any process without a
+compatibility manifest.
+
+```mojo
+from std.windows import RegKey, HKEY_LOCAL_MACHINE, KnownFolder, known_folder
+
+def main() raises:
+    print(known_folder(KnownFolder.DOCUMENTS))
+
+    var cpu = RegKey.open(
+        HKEY_LOCAL_MACHINE,
+        "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+    )
+    print(cpu.get_string("ProcessorNameString"))
+```
+
+Every struct offset in it comes from the metadata at compile time, for the
+reason the section above gives: `WIN32_FIND_DATAW` is 592 bytes with
+`cFileName` at 44 on 64-bit, and the numbers most sample code shows are the
+32-bit ones. A wrong offset there does not fail — it reads a filename out of
+the middle of a timestamp.
+
+**Named constants come from the metadata too**, and that was not the original
+plan. Writing this library meant transcribing about thirty-five constants by
+hand — access masks, flag bits, error codes. Thirty-four were right.
+`STARTF_USESTDHANDLES` was written as 1; it is 0x100, and 1 is
+`STARTF_USESHOWWINDOW`. Nothing errored: `CreateProcessW` succeeded, the pipe
+was created, `run_captured` returned exit 0 and an empty string, and the
+child's output appeared on the *parent's* console. The metadata had the right
+value the whole time, so `winkb_constant["NAME"]()` now folds any named
+constant or flag member to a literal at compile time, and a typo is this,
+with the source line:
+
+```
+note: the Win32 metadata has no 'constant_value' for STARTF_USESTDHANDLE
+```
+
+The tour that produced the screenshot is
+[examples/win32/windows_tour.mojo](examples/win32/windows_tour.mojo); it runs
+every function in the package against the real machine and prints what the
+machine said, rather than asserting. The run continues past the crop with the
+console section (which proves ANSI colour and console sizing), file
+timestamps, a captured child process, and a clipboard round trip through
+`café über 🐉`.
+
+One gap, named honestly: the metadata stores 5,837 GUID-valued constants
+(`FOLDERID_*`, `CLSID_*`) **without their bytes**, so `KnownFolder`'s ids are
+still transcribed from `shlobj.h`. COM interface IIDs are fine — those come
+from a different column, which is populated.
+
+### Building
+
+Requires Windows 11 ARM64 and Visual Studio Build Tools (for the MSVC sysroot).
+
+Three machine settings decide whether this works, none of them is discoverable
+from an error message, and **one of them cannot be changed after the first
+build**. Read [Three machine settings](PORT-JOURNAL.md) before building:
+Developer Mode plus `startup --windows_enable_symlinks` (without both, runfiles
+trees are written as copies at about a gigabyte per test target),
+`LongPathsEnabled`, and a short `--output_base` — that last one has to be chosen
+up front, because Bazel canonicalises the output base and a junction pointing at
+a long path resolves straight back to it.
+
+```bash
+.\bazelw.cmd build //KGEN/tools/mojo:mojo
+```
 
 ---
 
-*Built on a Lenovo IdeaCentre Mini that cost less than the graphics card this
-work is usually done on. It sits on the desk, running kernels correctly for a
-toolchain that does not know it exists yet. The project does have fans — but
-only the spinning kind.*
+# Anatomy of Mojo
+
+*What one 120 MB compiler binary actually contains, how a `.mojo` file becomes
+machine code, and where the runtime, standard library, and MAX fit around it —
+as found in the source tree during this port.*
+
+| | |
+| --- | --- |
+| **1** | binary: `mojo` — driver, parser, compiler, JIT, REPL, LSP |
+| **120 MB** | `mojo.exe`, with LLVM + MLIR statically inside |
+| **5** | private MLIR dialects (KGEN, POP, CO, HLCF, LIT) |
+| **38** | stdlib modules, pure Mojo, zero C in the library itself |
+| **322** | stdlib test files |
+
+## Part I — What Mojo is
+
+Mojo is a systems programming language wearing Python's syntax. Functions,
+structs, traits, and generics compile to native code with no interpreter and no
+GC, and ownership and borrow semantics do the memory management. Older writing
+about Mojo describes a Python-style `def` coexisting with a systems-style `fn`;
+that is no longer true at this version, which rejects `fn` with *"'fn' has been
+removed; use 'def' instead"*. It is not an isolated case — see
+[language drift](docs/LANGUAGE-DRIFT.md) for the full list of constructs the
+documentation still teaches and this compiler refuses, and
+[dialect notes](docs/DIALECT-NOTES.md) for how to write what it accepts. It was built by Modular as the language
+for writing AI kernels — code that must run on CPUs, GPUs, and accelerators from
+one source — and that origin explains its two defining traits.
+
+First, it is **MLIR-native**. Where most languages lower their AST to LLVM IR
+directly, Mojo parses into Modular's own MLIR dialects and does nearly all of its
+work — metaprogramming, generics, optimization — as MLIR transformations. LLVM
+only sees the final, fully-specialized result.
+
+Second, **compile-time execution is the metaprogramming system**. There is no
+separate template or macro language: `@parameter` code, generic instantiation,
+and constant evaluation all run in a built-in interpreter that executes the same
+IR the compiler is building. Types are values at compile time.
+
+The consequence is the unusual shape of the distribution: one large binary
+containing a full compiler stack, plus a small runtime the generated code calls
+into, plus a standard library written entirely in Mojo itself.
+
+## Part II — From source to machine code
+
+```mermaid
+flowchart LR
+    SRC([".mojo source"]) --> P
+
+    P["<b>Parse</b><br/>hand-written recursive descent<br/>AST, then initial IR<br/><i>KGEN/lib/MojoParser</i>"]
+    P --> R["<b>Raise to dialects</b><br/>ops in Modular's private MLIR<br/>dialects; types are first-class IR<br/><i>KGEN · POP · CO · HLCF · LIT</i>"]
+    R --> E["<b>Elaborate</b><br/>an interpreter executes compile-time<br/>code, instantiates generics,<br/>folds parameters<br/><i>KGEN/lib/Elaborator · Interpreter</i>"]
+    E --> L["<b>Lower</b><br/>LIT lowering, transforms,<br/>conversion to LLVM dialect<br/><i>KGEN/lib/LowerLIT · KGENToLLVM</i>"]
+    L --> V["<b>LLVM 22</b><br/>stock backend, statically linked<br/>codegen, optimization, target CPUs<br/><i>third-party/llvm-project</i>"]
+    V --> BIN(["<b>mojo build</b> — native binary<br/>linked by embedded lld against<br/>CompilerRT + AsyncRT<br/>PE/COFF, /MACHINE:ARM64, dynamic CRT"])
+
+    R -. "serialized before specialization" .-> PKG(["<b>mojo precompile</b> — .mojoc package<br/>pre-elaboration IR, architecture-independent;<br/>the importing compilation elaborates it for<br/>its own target — this is how the stdlib ships"])
+
+    classDef hot fill:#F5E3D7,stroke:#C2410C,stroke-width:2px,color:#1F1A16
+    classDef exit fill:#E2EAF0,stroke:#3B5F7A,color:#1F1A16
+    class E hot
+    class BIN,PKG exit
+```
+
+JIT variants of the same pipeline back `mojo run` and the REPL
+(`KGEN/lib/ExecutionEngine`).
+
+**Why the elaborator is the hot stage:** generic instantiation by compile-time
+interpretation is what lets one kernel source specialize for any target, and it
+is why a `.mojoc` is portable while a `.o` is not. It is also why the compiler
+needs its runtime present at build time — compile-time code allocates through the
+same `KGEN_CompilerRT` ABI that compiled programs use at run time.
+
+## Part III — How the repository composes
+
+```mermaid
+flowchart TB
+    D["<b>driver</b> — <i>KGEN/tools/mojo</i><br/>one CLI, subcommand per tool<br/>build · run · precompile · repl · debug · doc · format · demangle"]
+    C["<b>compiler</b> — <i>KGEN/lib</i><br/>parser, five dialects, elaborator/interpreter,<br/>lowering, JIT, LLDB and Jupyter glue<br/>the 120 MB lives here, plus LLVM"]
+    RT["<b>runtime</b> — <i>KGEN/lib/CompilerRT · AsyncRT</i><br/>what compiled programs link against:<br/>the KGEN_CompilerRT_* C ABI and async scheduler<br/>shared libraries, so <b>one allocator serves the process</b>"]
+    SL["<b>stdlib</b> — <i>mojo/stdlib/std</i><br/>38 modules of pure Mojo, shipped as one<br/>pre-elaborated std.mojoc (3.1 MB)<br/>OS access via ffi/sys, not C — why it ported unchanged"]
+    MX["<b>MAX</b> — <i>max/</i> — out of scope for this fork<br/>kernels in Mojo, graph compiler and serving in Python<br/>Mojo is its kernel language the way CUDA C++ is NVIDIA's"]
+
+    D --> C --> RT
+    SL -. "compiled by" .-> C
+    SL -. "calls" .-> RT
+    MX -. "built on" .-> SL
+
+    subgraph rail ["support machinery"]
+        direction TB
+        S1["<b>Support/ · AsyncRT/</b><br/>paths, logging, random, threading, tcmalloc glue<br/>where most Windows porting happened —<br/>POSIX assumptions live here, not in the language"]
+        S2["<b>bazel/ · rules_mojo</b><br/>custom cc-toolchain driving hermetic clang<br/>this port added an MSVC-sysroot repository rule<br/>and an aarch64-pc-windows-msvc toolchain"]
+        S3["<b>third-party LLVM 22</b><br/>vendored and patched; MLIR, backends, lld,<br/>LLDB, compiler-rt — statically linked into mojo"]
+    end
+
+    classDef magma fill:#F5E3D7,stroke:#7C2D12,stroke-width:2px,color:#1F1A16
+    classDef hot fill:#F5E3D7,stroke:#C2410C,stroke-width:2px,color:#1F1A16
+    classDef steel fill:#E2EAF0,stroke:#3B5F7A,color:#1F1A16
+    classDef plain fill:#FFFFFF,stroke:#1F1A16,color:#1F1A16
+    class C magma
+    class RT hot
+    class MX steel
+    class D,SL plain
+    class S1,S2,S3 plain
+```
+
+## Part IV — The process, on Windows
+
+Upstream builds the runtime globals as shared libraries for a reason: TCMalloc
+state, runtime configuration, and the allocator must exist *once* per process, no
+matter how many components link them. On Linux and macOS a single libc makes that
+automatic. On Windows it became the port's hardest bug: clang's default static
+CRT gave every module a private heap, and cross-module frees corrupted memory
+nondeterministically at teardown. The fix — `-fms-runtime-lib=dll` — restores the
+intended topology.
+
+```mermaid
+flowchart TB
+    subgraph proc ["one process"]
+        direction LR
+        EXE["<b>mojo.exe</b><br/>driver + compiler + LLVM<br/>statically linked"]
+        MS["<b>MSupportGlobals.dll</b><br/>allocator authority<br/>tc_new / tc_delete, support globals"]
+        AR["<b>AsyncRTRuntimeGlobals.dll</b><br/>async runtime state<br/>one scheduler per process"]
+    end
+
+    EXE --> HEAP
+    MS --> HEAP
+    AR --> HEAP
+    HEAP["<b>one shared ucrtbase heap</b><br/>/MD everywhere — exactly one allocator per process"]
+
+    classDef hot fill:#F5E3D7,stroke:#C2410C,stroke-width:2px,color:#1F1A16
+    classDef plain fill:#FFFFFF,stroke:#1F1A16,color:#1F1A16
+    class HEAP hot
+    class EXE,MS,AR plain
+```
+
+**Rule this port enforces:** memory may be allocated in any module and freed in
+any other, so every module must share the dynamic CRT. Static-CRT builds of this
+codebase are not a packaging choice — they are undefined behaviour.
+
+## Part V — Where the port stands
+
+| Milestone | State |
+| --- | --- |
+| toolchain | Hermetic clang 22 targeting `aarch64-pc-windows-msvc`, MSVC sysroot via vswhere, GNU-style flags against the MSVC ABI — the same architecture as Modular's Linux and macOS toolchains. |
+| dependencies | LLVM, MLIR, gRPC, protobuf, abseil, boringssl, curl, zlib-ng all compile. |
+| `mojo.exe` | Builds, links, parses and compiles Mojo on Windows ARM64. |
+| stdlib | Compiles to `std.mojoc` with warnings only — no source changes required. |
+| tests | 258 of 369 targets pass; 52 fail, 4 fail to build, 55 platform-skipped. |
+| Windows API | `std/windows/` — registry, shell folders, filesystem, console, system info, time, processes, clipboard — on metadata-derived layouts and constants. |
+| next | Drive down the failures, then performance against CPython. |
+
+> **Reading the tree yourself?** Start at `KGEN/tools/mojo/mojo.cpp` and follow a
+> subcommand into `KGEN/lib`. The dialect TableGen files under
+> `KGEN/include/KGEN` are the closest thing to a language-internals reference
+> that exists.
+
+---
+
+## Licence and attribution
+
+The Mojo compiler (`KGEN/`), the substrate, and the standard library are Apache
+2.0 **with LLVM exceptions**, and this fork inherits that licence — permissive,
+with a patent grant, and binary attribution waived. That is precisely why the
+scope line is drawn where it is.
+
+MAX (`max/`) is under the Modular Community License and is **out of scope** for
+this fork. Scoping to compiler and stdlib keeps this work wholly inside
+Apache 2.0.
+
+Upstream is [modular/modular](https://github.com/modular/modular). All original
+design credit belongs to Modular; the errors in this port are mine.
+
+---
+
+# The licence traps, and why they miss this work
+
+Modular's licensing is not one document but three, and most confusion about what
+you may do with Mojo comes from reading the wrong one. The traps in the stack are
+real, sharply drawn, and — for a project built the way this one is — inapplicable.
+The reasoning is worth writing down, because it is also the reason this repository
+is built the way it is.
+
+## Three instruments, and which governs what
+
+| Instrument | Governs | Reach here |
+| --- | --- | --- |
+| **Apache 2.0 + LLVM exceptions** | the per-file source: the compiler, and 4,585 files under `max/` by header count | **this is what we use** — irrevocable, commercial use fine, derivatives fine, no hardware or field-of-use limits |
+| **Community License** | Modular's **binary** SDK distributions | never invoked — no binaries used |
+| **Terms of Use** | the hosted platform and accounts | never invoked — no account |
+
+Decisively, the Community License itself concedes the point: for Apache-licensed
+components, Apache **"controls over these Terms in the event of any conflict."**
+The permissive grant on the source is not overridden by the terms attached to the
+binaries.
+
+## The trap, confirmed and dated
+
+`Licenses/LICENSE` in this tree is the Community License, **Last Modified:
+August 17, 2026**, and it contains — verbatim, verifiable in the file:
+
+- **Commercial use unlimited on x86/ARM CPUs and NVIDIA hardware, capped at
+  eight (8) accelerator devices for everything else.** Adreno and Hexagon are
+  neither CPUs nor NVIDIA. Snapdragon is precisely the monetised class:
+  free-on-NVIDIA to fight CUDA, pay-to-play everywhere else.
+- **Distributed applications "must only be run on hardware expressly supported by
+  MAX"** — custom hardware requires Modular's written permission "in its sole
+  discretion." A Snapdragon port would literally have to ask.
+- **A non-compete attached to the language**: you may not "develop an Application
+  in Mojo, for any Competitive Activity."
+- **A preamble** claiming the Terms bind anyone "developing software using... [the]
+  Mojo programming language" at all.
+- Plus mandatory logo rights for commercial users, telemetry, and a reserved right
+  to begin charging.
+
+## Then it changed, one day later
+
+The website version is dated **August 18** and removed every one of those clauses.
+Modular's own FAQ concedes it: the old licence *"capped free production use at
+eight accelerators outside x86, ARM and NVIDIA... Both requirements are now gone."*
+That has the unmistakable rhythm of a backlash correction. This tree still carries
+the stale, harsher text — which is why the dated quotation above matters.
+
+## The trap moved rather than died
+
+The replacement is aimed squarely at AI-assisted reimplementation. New **§1.3**
+forbids using MAX as AI input *"to produce software that reimplements or
+substitutes for MAX."* The Terms of Use add the concept of an **"AI-Derived
+Work"** — sweeping in *"translations, ports, transpilations, refactorings"*
+performed by AI, with explicit language that clean-room separation is **no
+exemption** if Modular IP was "input, reference, or inspiration."
+
+That clause describes this project's genus with uncomfortable precision, and it
+should be read carefully rather than waved away.
+
+## Why it does not reach us
+
+Both instruments bind on **using Modular's binaries or hosted platform**. This
+project never has:
+
+- **No account.** Nothing was ever accepted, clicked through, or signed.
+- **No wheel, no prebuilt toolchain.** Not one Modular binary has entered the
+  tree. On Windows ARM64 that was never even possible — a constraint that turns
+  out to be legally convenient.
+- **Everything descends from per-file Apache source**, whose grant Modular's own
+  supremacy clause concedes controls.
+
+And even the new §1.3 carves out *"develop[ing] Your own software that runs on or
+interoperates with MAX."* An ABI-compatible runtime is interoperation by
+definition.
+
+The journal's day-by-day provenance record turns out to be evidence, not merely a
+diary.
+
+## The bright line
+
+> **Never introduce Modular binaries, wheels, or accounts into this project.**
+
+The moment one is used, the AI clauses attach — and they attach to a person, not
+to a repository. Staying binary-free costs nothing: everything measured here was
+obtained without them.
+
+## Two residual flags
+
+- **Trademarks are a separate axis** from copyright licensing. Names that lead
+  with Modular's mark are the exposure; "MAX-compatible" in prose is defensible
+  nominative use. Renaming is cheap now and expensive later, if any of this ever
+  acquires commercial weight.
+- **Qualcomm's QAIRT `LICENSE.pdf`** is the other licence in the stack.
+  Irrelevant to the CPU and GPU lines, but it is the document to read before any
+  NPU work ships Qnn DLLs inside a product.
+
+## Caveat, honestly meant
+
+I am not a lawyer and this is not legal advice. The structural read is solid,
+quoted from the file in this tree, and dated — but it is a careful engineer's
+reading, not counsel. Anyone attaching commercial weight to this work should get
+a real opinion.

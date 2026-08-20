@@ -61,6 +61,7 @@ declare_tools()
             "//:linux_aarch64": ":linux-aarch64-{}".format(tool),
             "//:linux_x86_64": ":linux-x86_64-{}".format(tool),
             "@platforms//os:macos": ":macos-{}".format(tool),
+            "//:windows_arm64": ":windows-arm64-{}".format(tool),
         }),
         tags = [
             "manual",
@@ -94,6 +95,19 @@ builtin_module_map(
         "@platforms//os:macos": [
             "@clang-macos//:include_dir",
             "@sysroot-macos//sysroot:root",
+        ],
+        # The MSVC STL and SDK headers have to be in the module map too, not
+        # just clang's builtin headers. layering_check otherwise rejects every
+        # #include <atomic>, <string> and friends with "does not depend on a
+        # module exporting", because those headers belong to no module at all.
+        # The other platforms get this via their sysroot directory.
+        "//:windows_arm64": [
+            "@clang-windows-arm64//:include_dir",
+            "@sysroot-windows-arm64//vc_include:dir",
+            "@sysroot-windows-arm64//sdk_ucrt:dir",
+            "@sysroot-windows-arm64//sdk_shared:dir",
+            "@sysroot-windows-arm64//sdk_um:dir",
+            "@sysroot-windows-arm64//sdk_winrt:dir",
         ],
     }),
     tags = ["manual"],

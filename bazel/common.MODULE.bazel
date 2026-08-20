@@ -22,6 +22,10 @@ bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_pycross", version = "0.8.1")
 bazel_dep(name = "rules_python", version = "1.8.5")
+# The Win32 metadata database the compiler queries during elaboration, so
+# comptime code can ask what a Win32 struct actually looks like rather than
+# repeating it. Public domain, so it adds no licence obligation.
+bazel_dep(name = "sqlite3", version = "3.53.3")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "tcmalloc", version = "0.0.0-20250927-12f2552")
 bazel_dep(name = "tomlplusplus", version = "3.4.0")
@@ -40,6 +44,16 @@ bazel_dep(name = "buildifier_prebuilt", version = "8.2.1", dev_dependency = True
 archive_override(
     module_name = "rules_cc",
     integrity = "sha256-xPt/jPo70Y+LPhowjcTLhMxwtkZtw7QBwO969n7mWPo=",
+    patch_strip = 1,
+    patches = [
+        # alwayslink emits GNU --whole-archive brackets, which lld-link
+        # ignores with a warning, so every static-initializer registration
+        # (target lowerings, dialects, runtool) silently vanished from
+        # Windows links. The COFF spelling is /wholearchive:<lib> on the
+        # library argument itself; the patch mirrors rules_cc's own Apple
+        # -force_load mechanism.
+        "//bazel/public-patches:rules_cc_windows_wholearchive.patch",
+    ],
     strip_prefix = "rules_cc-ad214a9cb17d41e4e03199d61d436974a2261885",
     urls = [
         "https://github.com/bazelbuild/rules_cc/archive/ad214a9cb17d41e4e03199d61d436974a2261885.tar.gz",
@@ -55,6 +69,14 @@ archive_override(
         # Also includes a toolchain change which has to be done in lockstep to the current commit
         # That piece can be removed after the 8/5 nightly.
         "//bazel/public-patches:rules_mojo_toolchain.patch",
+        # rules_mojo looks for libpython* in the hermetic runtime; Windows
+        # CPython names it pythonXY.dll, so every mojo_test failed analysis.
+        "//bazel/public-patches:rules_mojo_windows_libpython.patch",
+        # Windows runfiles are a manifest, not a tree, so the OS loader can't
+        # find dependency DLLs that exist only as runfiles entries; compiled
+        # mojo tests died at startup with STATUS_DLL_NOT_FOUND. Materialize
+        # each dependency DLL beside the test executable.
+        "//bazel/public-patches:rules_mojo_windows_dlls_beside_binary.patch",
     ],
     strip_prefix = "rules_mojo-47643a3b441c20c3a351b8807e37c547338557c8",
     urls = [
@@ -102,6 +124,12 @@ single_version_override(
         "//bazel/public-patches:rules_pycross_exports.patch",
         # TODO: Remove when 3.8 is no longer pulled in transitively
         "//bazel/public-patches:rules_pycross_versions.patch",
+        # install_venv_wheels passes `environment` to rctx.execute, which
+        # replaces the environment rather than extending it. On Windows that
+        # drops SystemRoot, without which Winsock cannot load its service
+        # providers, so pip dies importing asyncio with WinError 10106 and
+        # every wheel install fails.
+        "//bazel/public-patches:rules_pycross-windows-env.patch",
     ],
 )
 
@@ -111,6 +139,14 @@ single_version_override(
     patches = [
         # FIXME: `@system_python` is a dev dep, but used in non-dev code
         "//bazel/public-patches:protobuf-dev-dep.patch",
+        # upb's AArch64 assembly fast path leaves LLVM unable to size the
+        # function for SEH unwind info on Windows ARM64.
+        "//bazel/public-patches:protobuf-upb-windows-arm64-asm.patch",
+        # LINK_OPTS' Windows branch was written for MinGW and asks for
+        # pthread.lib and m.lib, which do not exist against the MSVC ABI.
+        "//bazel/public-patches:protobuf-windows-link-opts.patch",
+        # CommandLineToArgvW lives in shell32.
+        "//bazel/public-patches:protobuf-windows-shell32.patch",
     ],
 )
 
@@ -132,8 +168,99 @@ single_version_override(
         "//bazel/public-patches:grpc-warnings.patch",
         # TODO: Drop when this is in a release: https://github.com/grpc/grpc/commit/a1e64a2ed6a81c2f51b65c4d28b265db5892dfec
         "//bazel/public-patches:grpc-loads.patch",
+        # grpc asks for Python 3.9 and 3.10 toolchains and a pip hub for each.
+        # rules_python publishes no aarch64-pc-windows-msvc runtime below 3.11,
+        # so those toolchains never register and resolving the hub fails before
+        # anything is compiled. 3.11 through 3.13 all exist on every platform we
+        # target, and grpc's own default (its last entry) stays 3.13.
+        "//bazel/public-patches:grpc-python-versions.patch",
     ],
     version = "1.76.0.bcr.1",
+)
+
+# protoc-gen-validate copies grpc's Python block verbatim, so it needs the same
+# treatment for the same reason: no aarch64-pc-windows-msvc runtime exists below
+# 3.11, and its pgv_pip_deps hub cannot resolve a 3.9 interpreter.
+# On Windows __m128i is MSVC's __n128, a union, which
+# __builtin_nontemporal_store rejects even though ABSL_HAVE_BUILTIN reports the
+# builtin as available.
+single_version_override(
+    module_name = "abseil-cpp",
+    patch_strip = 1,
+    patches = [
+        "//bazel/public-patches:abseil-windows-arm64-nontemporal.patch",
+        # Weak definitions in an archive are not pulled in by a weak reference,
+        # which ELF tolerates and lld-link does not.
+        "//bazel/public-patches:abseil-alwayslink-weak-definitions.patch",
+        # The rest of the weak-definition targets: tracing, stacktrace,
+        # leak_check, flags config, log_message and time.
+        "//bazel/public-patches:abseil-alwayslink-more-weak-definitions.patch",
+    ],
+    version = "20250814.2",
+)
+
+# xxhash's NEON compiler guard uses the "+w" constraint, which clang's
+# aarch64-pc-windows-msvc backend cannot lower.
+single_version_override(
+    module_name = "xxhash",
+    patch_strip = 1,
+    patches = [
+        "//bazel/public-patches:xxhash-windows-arm64-neon-guard.patch",
+    ],
+    version = "0.8.3.bcr.1",
+)
+
+# boringssl's util.bzl selects /std:c11 on Windows, the MSVC spelling that only
+# clang-cl accepts. Same root cause as the curl and zlib-ng patches. boringssl
+# arrives transitively rather than as a direct bazel_dep, so the version here is
+# the one bzlmod actually resolves.
+single_version_override(
+    module_name = "boringssl",
+    patch_strip = 1,
+    patches = [
+        "//bazel/public-patches:boringssl-clang-driver-flags.patch",
+        # HRSS's NEON vec_t is MSVC's __n128 union on Windows, so arithmetic on
+        # it does not compile.
+        "//bazel/public-patches:boringssl-hrss-windows-arm64.patch",
+    ],
+    version = "0.20241024.0",
+)
+
+# curl's Windows copts use MSVC /D spellings, which only clang-cl accepts. Same
+# root cause as the zlib-ng patch below: this port drives the ordinary clang
+# driver against the MSVC ABI, where a leading slash is a file path. This was by
+# far the largest single source of failures in the first full build.
+single_version_override(
+    module_name = "curl",
+    patch_strip = 1,
+    patches = [
+        "//bazel/public-patches:curl-clang-driver-flags.patch",
+        # The Windows SDK ships its own share.h, which shadows curl's.
+        "//bazel/public-patches:curl-share-h-shadowing.patch",
+    ],
+    version = "8.12.0",
+)
+
+# zlib-ng's Windows copts are MSVC /wd#### warning numbers, which only clang-cl
+# understands. This port drives the ordinary clang driver against the MSVC ABI,
+# where a leading slash is read as a file path, so every zlib-ng translation
+# unit fails with "no such file or directory: '/wd4244'".
+single_version_override(
+    module_name = "zlib-ng",
+    patch_strip = 1,
+    patches = [
+        "//bazel/public-patches:zlib-ng-clang-driver-flags.patch",
+    ],
+    version = "2.3.3",
+)
+
+single_version_override(
+    module_name = "protoc-gen-validate",
+    patch_strip = 1,
+    patches = [
+        "//bazel/public-patches:pgv-python-versions.patch",
+    ],
+    version = "1.2.1.bcr.2",
 )
 
 # Expose the :toml++-src target (header-only impl) to external repos
@@ -201,6 +328,18 @@ module_versions(
 # TODO: Drop once we can directly use cc_binary in parent rules
 compat = use_extension("@rules_cc//cc:extensions.bzl", "compatibility_proxy")
 use_repo(compat, "cc_compatibility_proxy")
+
+new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+
+# The Win32 metadata database the compiler queries during elaboration
+# (`winkb_query`). Kept outside git because it is 86 MB of generated data;
+# releases ship it as lib/windows_api.db, which is the compiled-in default
+# path. A different machine points this one line at its own copy.
+new_local_repository(
+    name = "winkb",
+    build_file_content = 'exports_files(["windows_api.db"])',
+    path = "C:/projects/windows_api",
+)
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 

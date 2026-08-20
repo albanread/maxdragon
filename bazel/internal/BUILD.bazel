@@ -165,6 +165,20 @@ mojo_copts_toolchain(
         "@platforms//os:macos": [
             "--target-cpu=apple-m1",
         ],
+        # --target-cpu is pinned after all. Left unset, Mojo detects the host
+        # CPU, which on a Snapdragon X reports oryon-1, and the LLVM built here
+        # rejects that with "unknown target CPU 'oryon-1'" even though the
+        # prebuilt clang 22.1.4 accepts it: the backend knows the processor but
+        # the TargetParser table this build produces does not.
+        #
+        # neoverse-n1 matches what linux_aarch64 uses and is a safe ARMv8.2
+        # baseline that every Windows ARM64 device supports. It does leave
+        # Oryon-specific instructions unused, so this is worth revisiting for
+        # performance once the CPU is recognised.
+        "//:windows_arm64": [
+            "-target-triple=aarch64-pc-windows-msvc",
+            "--target-cpu=neoverse-n1",
+        ],
     }) + select({
         "//:asan": ["--sanitize=address"],
         "//:tsan": ["--sanitize=thread"],
@@ -188,6 +202,7 @@ sh_binary(
 mojo_toolchain(
     name = "mojo_toolchain_target",
     implicit_deps = [],
+    winkb_db = "@winkb//:windows_api.db",
     lld = "@llvm-project//lld:lld",
     mojo = select({
         # nonsense just so it resolves. this should never actually run.
@@ -237,6 +252,10 @@ alias(
         "@platforms//os:macos": "@gperftools-macos//:tcmalloc",
         # NOTE: This library doesn't override new/free globally, which the default library does
         "@platforms//os:linux": "@tcmalloc//tcmalloc:tcmalloc_internal_methods_only_numa_aware",
+        # Neither tcmalloc nor gperftools supports Windows, so the process keeps
+        # the system allocator. That is a performance choice, not a correctness
+        # one, and is worth revisiting if allocation shows up in a profile.
+        "@platforms//os:windows": ":empty_lib",
     }),
 )
 
@@ -248,6 +267,8 @@ alias(
     actual = select({
         "@platforms//os:macos": ":empty_lib",
         "@platforms//os:linux": "@tcmalloc//tcmalloc:want_numa_aware",
+        # No tcmalloc on Windows, so there is no weak symbol to override.
+        "@platforms//os:windows": ":empty_lib",
     }),
 )
 
