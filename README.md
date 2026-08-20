@@ -657,6 +657,46 @@ definition.
 The journal's day-by-day provenance record turns out to be evidence, not merely a
 diary.
 
+## The charitable reading, which is also the correct one
+
+None of the above should be read as an accusation of malice, because the
+evidence points the other way. **Modular does not want Mojo stolen and turned
+into a competing product. That is the whole intent, and it is a fair one.**
+
+The tell is the one-day retraction. A company whose *intent* was a non-compete
+stapled to a programming language would not have deleted it within twenty-four
+hours and admitted the retreat in its own FAQ. That sequence reads as lawyers
+drafting past the engineers' intent and being made to walk it back — and the
+intent that survived the correction is the reasonable one.
+
+The fear behind the clauses has names. The industry watched AWS take Elastic,
+MongoDB, and Redis's open work and sell it back as a service until all three
+relicensed in self-defence. Modular's nightmare is not a hobbyist with a £350
+desktop; it is a hyperscaler or a silicon vendor lifting the platform wholesale.
+And the AI-Derived-Work language is the 2026 form of the same fear:
+LLM-laundering, where a codebase goes into a model and a "clean" clone comes
+out having never technically copied a line. The fence is badly drawn — the
+clean-room-is-no-exemption clause would, read literally, taint half the
+industry — but the wolf it is drawn against is real.
+
+Which is precisely why this project's conduct is documented to the point of
+tedium. This work *is* the benign form of the capability they fear: published
+source read carefully, compatible software built quickly. The difference
+between that and their nightmare lives entirely in conduct, so the conduct is
+kept legible — only what they published under Apache, implemented rather than
+extracted, interoperating at the API they designed for interoperation, no
+binaries taken, provenance journalled daily in public. The distinction between
+*interoperating with Mojo* and *stealing Mojo* should be visible from orbit.
+In this repository, it is.
+
+And the fork's own posture honours the legitimate intent better than any
+clause could compel: it opens by thanking the people who built the language,
+freezes at 1.1 rather than chasing them, states plainly that it is not a bid
+to become the Windows port, and keeps Modular's name on every file. Nobody
+here wants Mojo's throne. They gave away the source; we ran it on our own
+hardware and said thank you in the first paragraph. Both sides' legitimate
+interests are satisfied, and neither side's lawyers ever need to meet.
+
 ## The bright line
 
 > **Never introduce Modular binaries, wheels, or accounts into this project.**
