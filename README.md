@@ -44,8 +44,8 @@ executable that compiles and runs `.mojo` files on the machine you are sitting a
 | **Upstream** | `modular/modular` @ `f66d4d5` |
 | **Language version** | Mojo 1.1.0 — **frozen, see below** |
 | **Target** | `aarch64-pc-windows-msvc`, Windows 11, Snapdragon X |
-| **Scope** | Mojo compiler (KGEN), C++ substrate, stdlib, CPU codegen |
-| **Out of scope** | MAX (kernels, graph, engine, serve), GPU backends |
+| **Scope** | Mojo compiler (KGEN), C++ substrate, stdlib, CPU codegen — plus, via **DragonMax** (`dragon/`), GPU offload: a SPIR-V backend and `dragonrt`, a from-scratch implementation of the MAX device ABI, driving the Adreno |
+| **Out of scope** | MAX's graph engine and serving (unpublished upstream — nothing to port), Modular's binary distributions (never used, deliberately) |
 | **Licence** | Apache 2.0 with LLVM exceptions (compiler & stdlib) |
 
 ## The irony
@@ -65,6 +65,14 @@ meeting hardware where it lives.
 
 This fork exists to close that gap for one machine. That is the whole ambition.
 It is not a bid to become the Windows port.
+
+As of 2026-08-20 the gap is closed for two of the three: the CPU runs Mojo
+natively, and the Adreno runs Mojo kernels via SPIR-V (see
+[The GPU line](#the-gpu-line--mojo-kernels-on-snapdragon-silicon)). The Hexagon
+NPU is driven too — at 4.1× the CPU on gigabyte-scale graphs — but through QNN
+at the graph level, outside Mojo, because an NPU is not a kernel-dispatch
+device and pretending otherwise measurably loses to the CPU. The journal has
+those numbers.
 
 ## The freeze
 
@@ -112,6 +120,7 @@ running record, which is where the real detail lives.
 | --- | --- |
 | `mojo build` (AOT) | **works** — produces a running native ARM64 PE/COFF binary |
 | `mojo run` / REPL (JIT) | **cannot work** — LLVM has no COFF/ARM64 JITLink backend |
+| `--target-accelerator adreno-x1` (GPU offload) | **works** — Mojo kernels compile to SPIR-V and run on the Adreno through `dragonrt`; the acceptance test passes, see [The GPU line](#the-gpu-line--mojo-kernels-on-snapdragon-silicon) |
 | native CPU target | **broken** — `oryon-1` crashes the compiler, see below |
 | standalone driver | works only with two environment overrides, see below |
 
@@ -171,9 +180,11 @@ integer-division loop — is where the actual information is.
 Caveats that matter before anyone quotes these: the CPU target is wrong for both
 languages (above); `fib30` and `matmul256` are near timer resolution; mandelbrot
 is numerically chaotic and all three languages return slightly different counts,
-so it measures speed and not correctness; and none of Mojo's actual selling
-points — SIMD, `parallelize`, GPU — are exercised at all. This is scalar
-single-threaded codegen, the part Mojo shares with every other LLVM language.
+so it measures speed and not correctness; and of Mojo's actual selling
+points — SIMD, `parallelize`, GPU — only the GPU is exercised anywhere in this
+README (see [The GPU line](#the-gpu-line--mojo-kernels-on-snapdragon-silicon)),
+and not in this table. This is scalar single-threaded codegen, the part Mojo
+shares with every other LLVM language.
 
 ### The compiler knows Windows
 
@@ -464,7 +475,7 @@ flowchart TB
     C["<b>compiler</b> — <i>KGEN/lib</i><br/>parser, five dialects, elaborator/interpreter,<br/>lowering, JIT, LLDB and Jupyter glue<br/>the 120 MB lives here, plus LLVM"]
     RT["<b>runtime</b> — <i>KGEN/lib/CompilerRT · AsyncRT</i><br/>what compiled programs link against:<br/>the KGEN_CompilerRT_* C ABI and async scheduler<br/>shared libraries, so <b>one allocator serves the process</b>"]
     SL["<b>stdlib</b> — <i>mojo/stdlib/std</i><br/>38 modules of pure Mojo, shipped as one<br/>pre-elaborated std.mojoc (3.1 MB)<br/>OS access via ffi/sys, not C — why it ported unchanged"]
-    MX["<b>MAX</b> — <i>max/</i> — out of scope for this fork<br/>kernels in Mojo, graph compiler and serving in Python<br/>Mojo is its kernel language the way CUDA C++ is NVIDIA's"]
+    MX["<b>MAX device layer</b> — <i>max/ · dragon/</i> — <b>DragonMax</b><br/>the AsyncRT device ABI, reimplemented from its Apache-licensed<br/>declarations by <b>dragonrt</b>; Mojo kernels → SPIR-V → Adreno.<br/>Graph engine &amp; serve: unpublished upstream, still out of scope"]
 
     D --> C --> RT
     SL -. "compiled by" .-> C
@@ -550,9 +561,13 @@ The Mojo compiler (`KGEN/`), the substrate, and the standard library are Apache
 with a patent grant, and binary attribution waived. That is precisely why the
 scope line is drawn where it is.
 
-MAX (`max/`) is under the Modular Community License and is **out of scope** for
-this fork. Scoping to compiler and stdlib keeps this work wholly inside
-Apache 2.0.
+The `max/` tree is used **only through its per-file Apache 2.0 headers** —
+4,585 files carry them, and the Community License itself concedes Apache
+"controls" for those components (the full reading is in the licence-traps
+section below). What DragonMax built from them — `dragonrt`, the SPIR-V
+backend — is as open as the sources it read. Modular's *binary* MAX
+distributions, which the Community License actually governs, have never
+entered this tree, deliberately.
 
 Upstream is [modular/modular](https://github.com/modular/modular). All original
 design credit belongs to Modular; the errors in this port are mine.
