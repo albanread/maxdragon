@@ -68,7 +68,7 @@ def machine_state() -> dict:
     )
     holders = ps(
         "(Get-Process | Where-Object { $_.ProcessName -match "
-        "'geniex|llama|qnn|net-run|onnxruntime|genie' } | "
+        "'geniex|llama|qnn|net-run|onnxruntime|genie|WorkloadsSessionHost|WSAIFabric' } | "
         "ForEach-Object { $_.ProcessName }) -join ','"
     )
     npu = ps(
@@ -80,6 +80,9 @@ def machine_state() -> dict:
         "npu_device_status": npu,
         "nsp_driver_versions": [x for x in drivers.splitlines() if x][:4],
         "other_npu_processes": [x for x in holders.split(",") if x],
+        # WorkloadsSessionHost = Windows AI Fabric (WSAIFabricSvc): the OS's
+        # own NPU tenant (semantic indexing, Phi Silica, OCR). Seen at 94.9%
+        # NPU in Task Manager 2026-08-20 - benchmarks contend with it.
     }
 
 
