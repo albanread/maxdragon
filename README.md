@@ -360,6 +360,44 @@ as found in the source tree during this port.*
 | **38** | stdlib modules, pure Mojo, zero C in the library itself |
 | **322** | stdlib test files |
 
+## The GPU line — Mojo kernels on Snapdragon silicon
+
+![Mandelbrot rendered by a Mojo kernel on the Adreno X1-45](dragon/assets/adreno_mandelbrot.png)
+
+Every pixel in that window is computed by a Mojo kernel compiled to SPIR-V and
+executed on the Adreno X1-45 through `dragonrt`, this repo's implementation of
+the MAX device ABI; Direct3D is demoted to a texture upload. The demo is
+`examples/win32/adreno_mandelbrot.mojo`, and it is a harder test than it
+looks: saxpy (the acceptance test, which passes) has no branches and no loops,
+while Mandelbrot is a data-dependent loop whose trip count differs per
+work-item — exactly where wavefronts diverge and SPIR-V's structured control
+flow has to hold. It zooms. Smoothly.
+
+Captured live, the verification block that runs before the window opens:
+
+```
+grid           960 x 720  max_iter 512
+work           73 M iterations, 105 mean per pixel
+Adreno X1-45   16 ms per frame (compute + readback)
+Oryon, 1 core  250 ms
+speedup        148 / 10
+agreement      1713 of 691200 pixels differ (worst 415 iterations)
+  of those,    0 are low-count, locally-flat, delta>1 -- a codegen bug if nonzero
+```
+
+The last two lines are the house style in miniature: 0.25% of pixels differ
+from the CPU, and the demo *classifies* them before claiming victory —
+boundary pixels of a chaotic set flip under fp32 rounding order (arithmetic),
+while a low-count, locally-flat, large difference would be a codegen bug, and
+the count of those is zero. A picture that looks right is not evidence; a
+picture that survives that filter is.
+
+The GPU line's full record — the device runtime, the SPIR-V backend trio, the
+address-space saga, and the retractions — lives in
+[`DRAGONMAX-JOURNAL.md`](DRAGONMAX-JOURNAL.md) and `dragon/`.
+
+---
+
 ## Part I — What Mojo is
 
 Mojo is a systems programming language wearing Python's syntax. Functions,
@@ -494,6 +532,7 @@ codebase are not a packaging choice — they are undefined behaviour.
 | `mojo.exe` | Builds, links, parses and compiles Mojo on Windows ARM64. |
 | stdlib | Compiles to `std.mojoc` with warnings only — no source changes required. |
 | tests | 258 of 369 targets pass; 52 fail, 4 fail to build, 55 platform-skipped. |
+| GPU offload | **SG4 green** — the unmodified `adreno_saxpy` acceptance test passes on the Adreno X1-45 via SPIR-V and `dragonrt`; windowed Mandelbrot at 16 ms/frame vs 250 ms on one Oryon core. |
 | Windows API | `std/windows/` — registry, shell folders, filesystem, console, system info, time, processes, clipboard — on metadata-derived layouts and constants. |
 | next | Drive down the failures, then performance against CPython. |
 

@@ -1,0 +1,9 @@
+grid           960 x 720  max_iter 512
+work           73 M iterations, 105 mean per pixel
+Adreno X1-45   16 ms per frame (compute + readback)
+Oryon, 1 core  250 ms
+speedup        148 / 10
+agreement      1713 of 691200 pixels differ (worst 415 iterations)
+  of those,    0 are low-count, locally-flat, delta>1 -- a codegen bug if nonzero
+
+window open; the Adreno recomputes every frame. Esc or close to stop.
